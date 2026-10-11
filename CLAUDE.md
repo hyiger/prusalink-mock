@@ -81,9 +81,12 @@ CI (`.github/workflows/tests.yml`) runs Linux, macOS and Windows with Python
 * Responses are written by hand in `render.py`, never with `json.dumps`, to
   keep the firmware's key order, `%.Nf` floats and escaping.
 * Never print, log or store the password. The request log redacts X-Api-Key,
-  the Digest `response` and other Authorization credentials, and scrubs the
-  password from the other headers and the Digest username; the state API
-  leaves out `auth`.
+  the Digest `response` and other Authorization credentials, and scrubs every
+  password the mock has had from the other fields; the state API leaves out
+  `auth`. This is a convenience for test logs, not a security boundary: the
+  mock is a localhost test double with test passwords. Don't harden it
+  against hostile input or exotic password encodings; AGENTS.md has the
+  review scope.
 * Validate at the boundary. Scenarios, the control API and `MockPrinter`
   share one validator (`state.normalize`) that knows each field's firmware
   type and range. Input the firmware couldn't hold is a 400, a 422 or a
