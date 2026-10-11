@@ -1,0 +1,11 @@
+HTTP/1.1 401 Unauthorized
+Content-Type: application/json
+Connection: keep-alive
+Content-Length: 43
+WWW-Authenticate: Digest realm="Printer API", nonce="64ed7e1e0000000e", stale=false
+
+HTTP/1.1 404 Not Found
+Content-Type: application/json
+Connection: keep-alive
+Content-Length: 40
+
