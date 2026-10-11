@@ -113,7 +113,7 @@ curl -X POST $C/_mock/clock/advance -d '{"seconds":301}'
 
 A state write keeps the current password, `--password` included, unless it sets `auth.password`.
 
-Log entries carry the method, the raw target, the normalized path, headers with the API key, the Digest response and other credentials redacted, and every password the mock has had scrubbed from every other field (target, path, file names, errors), raw or percent-encoded, the auth outcome, status, whether the connection closed, the fault that fired, upload details (`stored_as`, `sfn_path`, `overwrite`, `print_after_upload`), `print_requested` for a print start, and `error` for timeouts, early closes and bugs in the mock. An entry is in the log before its response goes out. `--log-file` also appends them to a JSON lines file.
+Log entries carry the method, the raw target, the normalized path, headers with the API key, the Digest response and other credentials redacted, and every password the mock has had scrubbed from every other field (target, path, file names, errors), raw or percent-encoded, the auth outcome, status, whether the connection closed, the fault that fired, upload details (`stored_as`, `sfn_path`, `overwrite`, `print_after_upload`), `print_requested` for a print start, and `error` for timeouts, early closes and bugs in the mock. A logged string over 64 KiB is cut after scrubbing and ends with a count of what was left out. An entry is in the log before its response goes out. `--log-file` also appends them to a JSON lines file.
 
 ## Fault rules
 
@@ -213,6 +213,7 @@ Not modeled, or simplified:
 * Upload names with a control character or a backslash, which FatFS reads as the end of the name or a folder separator: 501.
 * Transfers: `/api/v1/transfer` is always 204 and status has no `transfer` block. Connect's partial transfers, and with them DELETE's "File is being transferred", aren't modeled.
 * Printing: Print-After-Upload and `POST /api/v1/files/...` are recorded but start nothing. Job pause, resume and stop change state at once, without the in-between states.
+* A request head over 16 MiB: 501, then a close. The firmware's parser streams a head of any length.
 * The 3-connection limit (`server.h:155-168`). Timeouts run from the last byte to the second; the firmware polls every 0.5 s.
 * Inside Authorization the parser is simpler than the firmware's: the scheme and quoted values may run across line ends, otherwise the header ends at the line end.
 * Short names for non-ASCII file names use `_` rather than the OEM code page.

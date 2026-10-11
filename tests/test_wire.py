@@ -372,3 +372,47 @@ def test_stalled_head_is_scrubbed_with_the_password_it_began_under(printer, shor
         time.sleep(0.6)  # past the active timeout
     entries = json.dumps(printer.requests())
     assert "request head timed out" in entries and old not in entries
+
+
+def _raw(printer, data: bytes):
+    with Conn("127.0.0.1", printer.port) as conn:
+        conn.sock.sendall(data)
+        return conn.read_response()
+
+
+def test_header_values_count_in_full_past_64_kib(printer):
+    """The firmware parses every header byte as it streams, however long the value."""
+    head = (f"PUT /api/v1/files/usb/long.gcode HTTP/1.1\r\nX-Api-Key: {printer.password}\r\n"
+            "Content-Length: " + "0" * 65536 + "4\r\n\r\n").encode()
+    r = _raw(printer, head + b"G28\n")
+    assert r.status == 201
+    assert printer.file_bytes("long.gcode") == b"G28\n"
+
+
+def test_digest_parameters_past_64_kib_are_read(printer):
+    from prusalink_mock.auth import DigestClient
+    with Conn("127.0.0.1", printer.port) as conn:
+        nonce = conn.request("GET", "/api/version").nonce
+    header = DigestClient(printer.password).header("GET", "/api/version", nonce)
+    scheme, params = header.split(" ", 1)
+    padded = f'{scheme} pad="{"x" * 70000}", {params}'
+    with Conn("127.0.0.1", printer.port) as conn:
+        assert conn.request("GET", "/api/version", [("Authorization", padded)]).status == 200
+
+
+def test_a_head_over_the_budget_is_not_modeled(printer):
+    from prusalink_mock import wire
+    head = (b"GET /api/version HTTP/1.1\r\nX-Big: " + b"a" * (wire.HEAD_BUDGET + 10) + b"\r\n\r\n")
+    r = _raw(printer, head)
+    assert r.status == 501 and r.closed and b"Not modeled" in r.body
+
+
+def test_logged_strings_are_cut_after_scrubbing(printer):
+    key = printer.password
+    cut = 64 * 1024
+    value = "a" * (cut - 5) + key  # the password straddles the cut
+    with Conn("127.0.0.1", printer.port) as conn:
+        conn.request("GET", "/api/version", [("X-Api-Key", key), ("X-Long", value)])
+    logged = [v for n, v in printer.requests()[-1]["headers"] if n == "X-Long"][0]
+    assert key[:5] not in logged[cut - 5:cut] and logged.endswith("more characters]")
+    assert len(logged) < cut + 64

@@ -77,6 +77,19 @@ class Input:
         return out
 
 
+LOG_FIELD_MAX = 64 * 1024  # characters of one logged string; the rest is only counted
+
+
+def _cap_for_log(value: Any) -> Any:
+    if isinstance(value, str) and len(value) > LOG_FIELD_MAX:
+        return value[:LOG_FIELD_MAX] + f"...[{len(value) - LOG_FIELD_MAX} more characters]"
+    if isinstance(value, dict):
+        return {k: _cap_for_log(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_cap_for_log(v) for v in value]
+    return value
+
+
 class MockCore:
     def __init__(self, scenario: str = statemod.DEFAULT_SCENARIO, *, host: str = "127.0.0.1", port: int = 8088,
                  control_host: str = "127.0.0.1", control_port: int = 8089, password: Optional[str] = None,
@@ -377,7 +390,8 @@ class MockCore:
         # client sent, encoded or not
         passwords = tuple(self.passwords)
         for key, value in entry.items():
-            entry[key] = authmod.scrub_value(value, *passwords)
+            # Scrubbed in full before cutting, so no cut can leave part of a password
+            entry[key] = _cap_for_log(authmod.scrub_value(value, *passwords))
         entry["duration_ms"] = round((time.monotonic() - started) * 1000, 1)
         self.log.add(entry)
 
@@ -404,8 +418,8 @@ class MockCore:
             rule = None
             if req.error is not None:
                 entry["route"] = "invalid"
-                handling = ERROR_CLOSE if req.error == 400 else req.plain_handling()
-                resp = wire.status_page(req.error, handling, req.accepts_json)
+                handling = ERROR_CLOSE if req.error in (400, 501) else req.plain_handling()
+                resp = wire.status_page(req.error, handling, req.accepts_json, req.error_message)
             elif not req.method_known:
                 entry["route"] = "invalid"
                 resp = wire.status_page(405, req.page_handling(405), req.accepts_json, "Unrecognized method")

@@ -33,7 +33,10 @@ GOODBYE = b"HTTP/1.1 408 Request Timeout\r\n\r\n\x00"
 _HWS = frozenset(b" \t")  # HorizWhitespace
 _SPACE = frozenset(b" \t\n\v\f\r")  # Whitespace (isspace)
 _LF, _CR, _COLON = 10, 13, 58
-_STORE_MAX = 64 * 1024  # bytes of one name or value kept for the log; the rest is parsed and dropped
+# Bytes of one head the mock keeps: every byte up to here counts in full, as the firmware's
+# streaming parser reads them all. A longer head is not modeled (501).
+HEAD_BUDGET = 16 * 1024 * 1024
+NOT_MODELED_HEAD = "Not modeled by prusalink-mock: a request head over 16 MiB"
 
 _METHODS = {m.lower().encode(): m for m in KNOWN_METHODS}
 
@@ -89,6 +92,7 @@ class Request:
     boundary: str = ""
     if_none_match: int = 0
     url_len: int = 0  # bytes of the URL as sent
+    error_message: str = ""
 
     def can_keep_alive(self) -> bool:
         """RequestParser::can_keep_alive (req_parser.cpp:265-267)."""
@@ -169,6 +173,8 @@ class HeadParser:
         self._name_mode = "trie"
         self._kind = _RAW
         self._value = bytearray()
+        self._kept = 0
+        self.over_budget = False
 
     def feed(self, data: bytes) -> int:
         """Read bytes until the head is complete; returns how many were used."""
@@ -199,8 +205,8 @@ class HeadParser:
             if self._method_unknown:
                 if b in _HWS:
                     self.state = "meth_sp"
-                elif len(self._method) < _STORE_MAX:
-                    self._method.append(b)
+                else:
+                    self._keep(self._method, b)
                 return True
             low = bytes(_lower(c) for c in self._method)
             if b in _HWS and low in _METHODS:
@@ -371,8 +377,8 @@ class HeadParser:
         if mode == "unknown":
             if b == _COLON:
                 self._start_value(None)
-            elif len(self._name) < _STORE_MAX:
-                self._name.append(b)
+            else:
+                self._keep(self._name, b)
             return True
         if mode == "term":  # a complete known name followed by spaces
             if b == _COLON:
@@ -402,9 +408,15 @@ class HeadParser:
         self._kind = _HEADERS[known] if known is not None else _RAW
         self.state = "h_sep"
 
+    def _keep(self, buf: bytearray, b: int) -> None:
+        if self._kept < HEAD_BUDGET:
+            buf.append(b)
+            self._kept += 1
+        else:
+            self.over_budget = True
+
     def _value_byte(self, b: int) -> None:
-        if len(self._value) < _STORE_MAX:
-            self._value.append(b)
+        self._keep(self._value, b)
 
     def _end_header(self) -> None:
         name = self._name.decode("latin-1").rstrip(" \t")
@@ -412,8 +424,7 @@ class HeadParser:
 
     def _url_byte(self, b: int) -> None:
         self._url_len += 1
-        if len(self._url) < _STORE_MAX:
-            self._url.append(b)
+        self._keep(self._url, b)
 
     def _version_event(self, b: int) -> None:
         """Version digits into the parser's 2- and 4-bit fields (req_parser.cpp:181-190)."""
@@ -442,6 +453,8 @@ class HeadParser:
         _apply_headers(req)
         if self.error is not None:
             req.error = self.error
+        if self.over_budget:  # bytes were dropped, so nothing derived from the head can be trusted
+            req.error, req.error_message = 501, NOT_MODELED_HEAD
         return req
 
 
