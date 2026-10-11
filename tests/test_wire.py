@@ -400,11 +400,23 @@ def test_digest_parameters_past_64_kib_are_read(printer):
         assert conn.request("GET", "/api/version", [("Authorization", padded)]).status == 200
 
 
-def test_a_head_over_the_budget_is_not_modeled(printer):
+@pytest.mark.parametrize("filler", [
+    pytest.param(lambda n: b"X-Big: " + b"a" * n + b"\r\n", id="one-long-value"),
+    pytest.param(lambda n: b"Accept:\r\n" * (n // 9 + 1), id="many-known-headers"),
+])
+def test_a_head_over_the_budget_is_not_modeled(printer, filler):
     from prusalink_mock import wire
-    head = (b"GET /api/version HTTP/1.1\r\nX-Big: " + b"a" * (wire.HEAD_BUDGET + 10) + b"\r\n\r\n")
+    head = b"GET /api/version HTTP/1.1\r\n" + filler(wire.HEAD_BUDGET) + b"\r\n"
     r = _raw(printer, head)
     assert r.status == 501 and r.closed and b"Not modeled" in r.body
+
+
+def test_a_head_of_exactly_the_budget_is_read(printer):
+    from prusalink_mock import wire
+    start = f"GET /api/version HTTP/1.1\r\nX-Api-Key: {printer.password}\r\nX-Pad: ".encode()
+    head = start + b"a" * (wire.HEAD_BUDGET - len(start) - 4) + b"\r\n\r\n"
+    assert len(head) == wire.HEAD_BUDGET
+    assert _raw(printer, head).status == 200
 
 
 def test_logged_strings_are_cut_after_scrubbing(printer):

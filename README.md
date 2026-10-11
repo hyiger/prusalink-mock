@@ -213,7 +213,7 @@ Not modeled, or simplified:
 * Upload names with a control character or a backslash, which FatFS reads as the end of the name or a folder separator: 501.
 * Transfers: `/api/v1/transfer` is always 204 and status has no `transfer` block. Connect's partial transfers, and with them DELETE's "File is being transferred", aren't modeled.
 * Printing: Print-After-Upload and `POST /api/v1/files/...` are recorded but start nothing. Job pause, resume and stop change state at once, without the in-between states.
-* A request head over 16 MiB: 501, then a close. The firmware's parser streams a head of any length.
+* A request head over 1 MiB: 501 as soon as the budget runs out, then a close. The firmware's parser streams a head of any length.
 * The 3-connection limit (`server.h:155-168`). Timeouts run from the last byte to the second; the firmware polls every 0.5 s.
 * Inside Authorization the parser is simpler than the firmware's: the scheme and quoted values may run across line ends, otherwise the header ends at the line end.
 * Short names for non-ASCII file names use `_` rather than the OEM code page.
