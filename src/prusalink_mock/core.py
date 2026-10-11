@@ -359,10 +359,10 @@ class MockCore:
     def _log(self, entry: dict, req: Request, auth: Optional[authmod.AuthResult], started: float) -> None:
         entry["headers"] = [[authmod.scrub(n, self.password), authmod.redact_header(n, v, auth, self.password)]
                             for n, v in req.headers]
-        # The password can also come in the target, a file name or text the client sent
+        # The password can also come in the target, a file name, any header or other text the
+        # client sent, encoded or not
         for key, value in entry.items():
-            if key != "headers":
-                entry[key] = authmod.scrub_value(value, self.password)
+            entry[key] = authmod.scrub_value(value, self.password)
         entry["duration_ms"] = round((time.monotonic() - started) * 1000, 1)
         self.log.add(entry)
 

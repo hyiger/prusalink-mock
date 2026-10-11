@@ -362,8 +362,10 @@ def test_password_is_redacted_from_every_logged_field(tmp_path):
             with Conn("127.0.0.1", printer.port) as conn:
                 conn.request("GET", target, [("X-Api-Key", key)])
         with Conn("127.0.0.1", printer.port) as conn:
+            conn.request("GET", "/api/version", [("X-Api-Key", key), ("X-Leak", lower), (lower, "x")])
+        with Conn("127.0.0.1", printer.port) as conn:
             conn.request("PUT", f"/api/v1/files/usb/{key}.gcode",
                          [("X-Api-Key", key), ("Content-Length", "5")], b"G28\n\n")
         entries = json.dumps(printer.requests())
-        assert key not in entries and lower not in entries.lower() and entries.count("<redacted>") >= 4
+        assert key not in entries and lower not in entries.lower() and entries.count("<redacted>") >= 6
     assert key not in log.read_text(encoding="utf-8")
