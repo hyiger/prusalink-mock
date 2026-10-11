@@ -22,7 +22,7 @@ User: maker. Password and API key: the scenario's test key (see README)
 Control API: http://127.0.0.1:8089
 ```
 
-Every shipped scenario uses the test key `mockKeyTest2345`, as both the API key and the Digest password. Use `--password-file FILE` (or `--password`) to set your own; the mock never prints it.
+Every shipped scenario uses the test key `mockKeyTest2345`, as both the API key and the Digest password. Use `--password-file FILE` (or `--password`) to set your own; the mock never prints it. The file may start with a UTF-8 byte order mark and end with a line break. An empty file is an error: for login disabled, use `--scenario login-disabled`.
 
 Options: `--scenario NAME|FILE`, `--host` (default `127.0.0.1`), `--port` (default 8088), `--control-port` (default 8089), `--log-file requests.jsonl`, `--seed N` for repeatable nonces, `--frozen-clock` so time moves only through the control API.
 
@@ -70,7 +70,14 @@ A scenario is one flat JSON file. Outside `tools` and `job`, every field has a d
 
 `src/prusalink_mock/scenarios/indx-printing.json` shows most of them.
 
-`tools` is the `/api/v1/tools` body, so a captured body pastes straight in. A missing key is a dock that isn't calibrated (the firmware leaves it out). Scenarios are checked against the firmware's limits: tool keys 1 to 8 on an INDX, material up to 7 bytes, vendor and color up to 15, `color_hex` as uppercase `#RRGGBB` or empty, and an unloaded tool reports empty strings. `color_hex` can be left out for the 16 preset colors.
+`tools` is the `/api/v1/tools` body, so a captured body pastes straight in. A missing key is a dock that isn't calibrated (the firmware leaves it out). Tool keys are the strings `"1"` to `"8"` on an INDX, and an unloaded tool reports empty strings. Names follow the firmware's rules: material is up to 7 bytes of `A-Za-z0-9_-` and not `---`; vendor and color are up to 15 bytes of `A-Za-z0-9 _-.+&` with no space at either end. A preset vendor or color is spelled exactly as the firmware spells it. A preset color always has its own `color_hex`, so it can be left out for the 16 presets; a user color needs one, as uppercase `#RRGGBB`. Tools that name the same user vendor or color agree on its spelling and its `color_hex`.
+
+Everything else is checked against the type the firmware keeps it in, so the printer port never sends something the firmware couldn't:
+
+* Strings are valid Unicode without control characters. `hostname` is up to 20 bytes, `serial` 24, `job.file.display_name` 166 and `job.file.sfn_path` 102. `printer_version` is three numbers from 0 to 255, like `7.10.0`.
+* Decimal numbers fit a 32-bit float. `bed.target` and `nozzle.target` are whole numbers from -32768 to 32767 (`60` or `60.0`).
+* `job_id`, `flow`, `speed` and the fans are 0 to 65535, and `time_printing` 0 to 4294967295. `time_remaining` and `filament_change_in` stop at 4294967294: the firmware leaves the field out at 4294967295, so leave it out instead. `size` is 0 to 2147483647 (a 32-bit `off_t`), and `m_timestamp` a FAT date from 1980 to 2107 (315532800 to 4354819199).
+* A scenario or patch is a JSON object nested 32 levels deep at most.
 
 ## Control API
 
@@ -85,10 +92,10 @@ JSON over HTTP on `127.0.0.1:8089` (`$PRUSALINK_MOCK_CONTROL` under `run`). Cont
 | `PUT /_mock/tools/{n}`, `DELETE /_mock/tools/{n}` | Set one tool; delete means its dock isn't calibrated |
 | `GET /_mock/scenarios`, `POST /_mock/scenario {"name": ...}` | List or switch scenarios (drops printer connections, clears files) |
 | `POST /_mock/reset` | Reload the scenario; clear faults, log and files; reboot, which drops printer connections and requests in flight |
-| `GET /_mock/requests?since=N`, `DELETE /_mock/requests` | Request log after sequence N; clear it |
+| `GET /_mock/requests?since=N&limit=M`, `DELETE /_mock/requests` | Request log after sequence N (the first M entries); clear it |
 | `GET /_mock/files`, `GET /_mock/files/{path}`, `DELETE ...` | Uploaded files; the raw bytes of one |
 | `GET`, `POST`, `DELETE /_mock/faults`, `DELETE /_mock/faults/{id}` | Fault rules |
-| `POST /_mock/clock/advance {"seconds": N}` | Move uptime on (301 s expires every nonce) |
+| `POST /_mock/clock/advance {"seconds": N}` | Move uptime on (301 s expires every nonce). The wall clock stops at the end of 2107, the last FAT date; a step past it is 400. |
 | `POST /_mock/reboot` | New nonce random half: old nonces get `stale=true` |
 | `POST /_mock/shutdown` | Stop `serve` |
 
@@ -104,7 +111,9 @@ curl -o got.gcode "$C/_mock/files/benchy.bgcode"
 curl -X POST $C/_mock/clock/advance -d '{"seconds":301}'
 ```
 
-Log entries carry the method, the raw target, the normalized path, headers with the API key and Digest response redacted, the auth outcome, status, whether the connection closed, the fault that fired, upload details (`stored_as`, `sfn_path`, `overwrite`, `print_after_upload`), `print_requested` for a print start, and `error` for timeouts, early closes and bugs in the mock. An entry is in the log before its response goes out. `--log-file` also appends them to a JSON lines file.
+A state write keeps the current password, `--password` included, unless it sets `auth.password`.
+
+Log entries carry the method, the raw target, the normalized path, headers with the API key, the Digest response and other credentials redacted (and the password scrubbed from any other header), the auth outcome, status, whether the connection closed, the fault that fired, upload details (`stored_as`, `sfn_path`, `overwrite`, `print_after_upload`), `print_requested` for a print start, and `error` for timeouts, early closes and bugs in the mock. An entry is in the log before its response goes out. `--log-file` also appends them to a JSON lines file.
 
 ## Fault rules
 
@@ -117,9 +126,9 @@ curl -X POST $C/_mock/faults -d '{"match":{"method":"GET","path":"/api/v1/tools"
 
 | Action | Effect |
 | --- | --- |
-| `{"type":"status","status":503,"message":"..."}` | A firmware-style status page with any code. `body` and `content_type` send your own body instead; `close` forces Connection: close. |
+| `{"type":"status","status":503,"message":"..."}` | A firmware-style status page with any code; `message` is one line of text. `body` and `content_type` (printable ASCII) send your own body instead; `close` forces Connection: close. |
 | `{"type":"malformed","mode":"truncate","keep_bytes":40}` | The real JSON cut short, in a clean chunked stream |
-| `{"type":"malformed","mode":"wrong_shape"}` | Valid JSON of the wrong shape (the body wrapped in an array, or your `body`) |
+| `{"type":"malformed","mode":"wrong_shape"}` | Valid JSON of the wrong shape (the body wrapped in an array, or your `body`, which has to be valid JSON) |
 | `{"type":"malformed","mode":"html"}` | A 200 captive-portal HTML page |
 | `{"type":"delay","ms":1500}` | Wait, then answer normally |
 | `{"type":"hang","seconds":30}` | Never answer; close after `seconds` (30 at most) or at shutdown |
@@ -134,7 +143,7 @@ For "connection refused", point the client at a closed port.
 python -m prusalink_mock run --scenario indx-gaps --log-file build/prusalink-mock.jsonl -- ./slic3rutils_tests "[PrusaLinkMock]"
 ```
 
-This starts the mock on free `127.0.0.1` ports, exports `PRUSALINK_MOCK_URL`, `PRUSALINK_MOCK_CONTROL` and `PRUSALINK_MOCK_KEY` to the command, returns the command's exit code, and then shuts the mock down, hung requests included. There's no daemon to clean up. For CTest:
+This starts the mock on free `127.0.0.1` ports, exports `PRUSALINK_MOCK_URL`, `PRUSALINK_MOCK_CONTROL` and `PRUSALINK_MOCK_KEY` to the command, returns the command's exit code, and then shuts the mock down, hung requests included. There's no daemon to clean up. SIGTERM and SIGHUP sent to `plmock` are passed on to the command. After a SIGINT the command gets a second to end on its own, since Ctrl-C in a terminal reaches it too; then it gets the SIGINT, and after 10 seconds SIGTERM. For CTest:
 
 ```cmake
 add_test(NAME prusalink_mock

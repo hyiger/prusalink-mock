@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-import math
+import re
 from typing import TYPE_CHECKING, Any, Optional
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -23,8 +23,8 @@ READ_TIMEOUT_S = 30.0
 MAX_BODY = 16 * 1024 * 1024
 
 _REASONS = {200: "OK", 201: "Created", 204: "No Content", 400: "Bad Request", 404: "Not Found",
-            405: "Method Not Allowed", 413: "Payload Too Large", 422: "Unprocessable Entity",
-            500: "Internal Server Error"}
+            405: "Method Not Allowed", 413: "Payload Too Large", 414: "URI Too Long", 422: "Unprocessable Entity",
+            431: "Request Header Fields Too Large", 500: "Internal Server Error"}
 
 
 class _Reply(Exception):
@@ -101,12 +101,12 @@ def dispatch(core: "MockCore", method: str, target: str, body: bytes) -> tuple[i
         if method == "DELETE":
             core.log.clear()
             return 200, {"ok": True}
-        try:
-            since = int(query.get("since", ["0"])[0])
-            limit = int(query["limit"][0]) if "limit" in query else None
-        except ValueError:
-            raise _Reply(400, {"error": "since and limit must be integers"})
-        return 200, {"entries": core.log.since(since, limit), "last_seq": core.log.last_seq}
+        since = query.get("since", ["0"])[0]
+        limit = query.get("limit", [None])[0]
+        if not re.fullmatch(r"[0-9]{1,18}", since) or not (limit is None or re.fullmatch(r"0*[1-9][0-9]{0,17}", limit)):
+            raise _Reply(400, {"error": "since must be an integer >= 0 and limit an integer >= 1"})
+        entries = core.log.since(int(since), None if limit is None else int(limit))
+        return 200, {"entries": entries, "last_seq": core.log.last_seq}
     if head == "files":
         if len(rest) == 1:
             allow("GET")
@@ -146,10 +146,12 @@ def dispatch(core: "MockCore", method: str, target: str, body: bytes) -> tuple[i
         allow("POST")
         doc = _json_body(body)
         seconds = doc.get("seconds") if isinstance(doc, dict) else None
-        if (isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or not math.isfinite(seconds)
-                or seconds < 0):
+        if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
             raise _Reply(400, {"error": 'expected {"seconds": <non-negative number>}'})
-        core.advance_clock(seconds)
+        try:
+            core.advance_clock(seconds)
+        except ValueError as exc:
+            raise _Reply(400, {"error": str(exc)})
         return 200, {"uptime": core.clock.uptime()}
     if head == "reboot" and len(rest) == 1:
         allow("POST")
@@ -162,9 +164,17 @@ def dispatch(core: "MockCore", method: str, target: str, body: bytes) -> tuple[i
     raise _Reply(404, {"error": "unknown endpoint"})
 
 
+async def _readline(reader: asyncio.StreamReader, status: int, what: str) -> bytes:
+    """One line; a line longer than the reader's buffer limit (64 KiB) answers ``status``."""
+    try:
+        return await asyncio.wait_for(reader.readline(), READ_TIMEOUT_S)
+    except ValueError:  # LimitOverrunError is turned into ValueError by readline
+        raise _Reply(status, {"error": f"{what} too long"})
+
+
 async def _read_request(reader: asyncio.StreamReader,
                         writer: asyncio.StreamWriter) -> Optional[tuple[str, str, bytes]]:
-    line = await asyncio.wait_for(reader.readline(), READ_TIMEOUT_S)
+    line = await _readline(reader, 414, "request line")
     if not line:
         return None
     parts = line.decode("latin-1").split()
@@ -174,17 +184,17 @@ async def _read_request(reader: asyncio.StreamReader,
     length = 0
     expect_continue = False
     while True:
-        h = await asyncio.wait_for(reader.readline(), READ_TIMEOUT_S)
+        h = await _readline(reader, 431, "header line")
         h = h.rstrip(b"\r\n")
         if not h:
             break
         name, _, value = h.decode("latin-1").partition(":")
         name = name.strip().lower()
         if name == "content-length":
-            try:
-                length = int(value.strip())
-            except ValueError:
+            value = value.strip(" \t")
+            if not re.fullmatch(r"[0-9]+", value):
                 raise _Reply(400, {"error": "bad Content-Length"})
+            length = int(value) if len(value) <= 18 else MAX_BODY + 1
         elif name == "expect":
             expect_continue = value.strip().lower().startswith("100-continue")
     if length > MAX_BODY:
@@ -198,12 +208,27 @@ async def _read_request(reader: asyncio.StreamReader,
     return method, target, body
 
 
+async def _linger(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    """Half-close and read what the client still sends, so it gets the reply rather
+    than a reset for closing with unread input."""
+    try:
+        if writer.can_write_eof():
+            writer.write_eof()
+        deadline = asyncio.get_running_loop().time() + 5
+        while await asyncio.wait_for(reader.read(65536), max(0.0, deadline - asyncio.get_running_loop().time())):
+            pass
+    except (asyncio.TimeoutError, ConnectionError, OSError):
+        pass
+
+
 async def handle_control(core: "MockCore", reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    read_all = False
     try:
         try:
             req = await _read_request(reader, writer)
             if req is None:
                 return
+            read_all = True
             status, payload = dispatch(core, *req)
         except _Reply as reply:
             status, payload = reply.status, reply.payload
@@ -219,6 +244,8 @@ async def handle_control(core: "MockCore", reader: asyncio.StreamReader, writer:
                 f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n")
         writer.write(head.encode("latin-1") + body)
         await writer.drain()
+        if not read_all:
+            await _linger(reader, writer)
     except (ConnectionError, OSError):
         pass
     finally:

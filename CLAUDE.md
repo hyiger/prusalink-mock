@@ -81,8 +81,19 @@ CI (`.github/workflows/tests.yml`) runs Linux, macOS and Windows with Python
 
 * Responses are written by hand in `render.py`, never with `json.dumps`, to
   keep the firmware's key order, `%.Nf` floats and escaping.
-* Never print, log or store the password. The request log redacts X-Api-Key
-  and the Digest `response`; the state API leaves out `auth`.
+* Never print, log or store the password. The request log redacts X-Api-Key,
+  the Digest `response` and other Authorization credentials, and scrubs the
+  password from the other headers and the Digest username; the state API
+  leaves out `auth`.
+* Validate at the boundary. Scenarios, the control API and `MockPrinter`
+  share one validator (`state.normalize`) that knows each field's firmware
+  type and range. Input the firmware couldn't hold is a 400, a 422 or a
+  `ScenarioError` up front, never accepted and then a 500, a dropped
+  connection or invalid JSON on the printer port later.
+* Signals in code, tests and probes: SIGTERM, SIGHUP and SIGINT only. Never
+  SIGQUIT, SIGABRT, SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGTRAP or SIGSYS: on
+  macOS each process that dies from one gets a crash report and a dialog.
+  `plmock run` never re-raises a signal on itself.
 * Docs are in the user's voice: American spelling, no em-dashes, concise.
 * Commits: imperative, capitalized subject, no trailing period. Never push to
   `main` directly; work on a branch.

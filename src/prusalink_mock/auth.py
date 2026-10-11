@@ -23,6 +23,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional, Sequence
 
+from .state import FAT_TIME_MAX, FAT_TIME_MIN
+
 REALM = "Printer API"
 USERNAME = "maker"
 NONCE_LIFETIME_S = 300  # src/common/http/types.h:164
@@ -49,13 +51,23 @@ class Clock:
     but not the wall time: on the printer that comes from the RTC and SNTP
     (src/common/sys_time.cpp, wui_api.cpp:246), and file times from FatFS's
     get_fattime() (src/buddy/fatfs.cpp:19).
+
+    The wall time stays within the FAT date range (1980 to 2107), the only
+    times a file on the USB drive can carry; that also keeps the uptime within
+    the uint32 seconds of ticks_s.
     """
 
     def __init__(self, *, frozen: bool = False, epoch: Optional[float] = None,
                  monotonic: Callable[[], float] = time.monotonic):
         self._monotonic = monotonic
         self.frozen = frozen
-        self.epoch = float(int(time.time()) if epoch is None else int(epoch))  # wall time at the last boot
+        start = min(max(time.time(), FAT_TIME_MIN), FAT_TIME_MAX) if epoch is None else epoch
+        # Compared before any conversion: an int too large for a double can't be converted.
+        if (isinstance(start, bool) or not isinstance(start, (int, float))
+                or not FAT_TIME_MIN <= start <= FAT_TIME_MAX):
+            raise ValueError(f"epoch must be a Unix time in {FAT_TIME_MIN}..{FAT_TIME_MAX}, "
+                             "1980 to 2107 (the FAT date range)")
+        self.epoch = float(int(start))  # wall time at the last boot
         self._boot = monotonic()
         self._offset = 0.0
 
@@ -67,16 +79,29 @@ class Clock:
         return int(self._elapsed()) & 0xFFFFFFFF
 
     def advance(self, seconds: float) -> None:
+        """Move time on by ``seconds``.
+
+        ValueError, with the clock unchanged, unless ``seconds`` is a number from 0
+        up to what keeps the wall time within 2107.
+        """
+        if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
+            raise ValueError("seconds must be a number")
+        left = max(0, FAT_TIME_MAX - int(self.epoch + self._elapsed()))
+        # Compared before any conversion: an int too large for a double can't be
+        # converted, and NaN fails every comparison.
+        if not 0 <= seconds <= left:
+            raise ValueError(f"seconds must be in 0..{left}: the wall clock stops at the end of 2107, "
+                             "the last FAT date")
         self._offset += float(seconds)
 
     def reboot(self) -> None:
-        self.epoch += self._elapsed()
+        self.epoch = min(self.epoch + self._elapsed(), float(FAT_TIME_MAX))
         self._boot = self._monotonic()
         self._offset = 0.0
 
     def now(self) -> int:
         """Wall-clock seconds for file timestamps."""
-        return int(self.epoch + self._elapsed())
+        return min(int(self.epoch + self._elapsed()), FAT_TIME_MAX)
 
 
 class NonceSource:
@@ -113,10 +138,10 @@ class AuthResult:
     username: Optional[str] = None
     nonce: Optional[str] = None  # the nonce the client sent, as 16 hex digits
 
-    def log_dict(self) -> dict:
+    def log_dict(self, password: str = "") -> dict:
         d = {"scheme": self.scheme, "present": self.present, "ok": self.ok}
         if self.username is not None:
-            d["username"] = self.username
+            d["username"] = scrub(self.username, password)
         if self.scheme == "digest" and not self.ok:
             d["stale"] = self.stale
         return d
@@ -265,8 +290,26 @@ def check(headers: Sequence[tuple[str, str]], method: str, target: str, password
     return result
 
 
-def redact_header(name: str, value: str, auth: Optional[AuthResult]) -> str:
-    """Header value safe for the request log: never the key or the digest response."""
+# Schemes whose name is safe to log; any other first word could be the key itself.
+_LOGGED_SCHEMES = ("basic", "bearer", "negotiate", "ntlm", "apikey", "token")
+
+
+def scrub(text: str, password: str) -> str:
+    """``text`` with every occurrence of the password replaced by <redacted>.
+
+    Header values are latin-1 decoded bytes, so the password is matched as its
+    UTF-8 bytes read the same way.
+    """
+    key = password.encode("utf-8").decode("latin-1")
+    return text.replace(key, "<redacted>") if key else text
+
+
+def redact_header(name: str, value: str, auth: Optional[AuthResult], password: str = "") -> str:
+    """Header value safe for the request log: never the key or the digest response.
+
+    Authorization is rebuilt from its parameters, so text the client ran into it
+    across line ends (another header, say) is scrubbed with the rest.
+    """
     lname = name.lower()
     if lname == "x-api-key":
         if auth is not None and auth.scheme == "apikey":
@@ -275,14 +318,15 @@ def redact_header(name: str, value: str, auth: Optional[AuthResult]) -> str:
     if lname == "authorization":
         scheme = value.split(None, 1)[0] if value.strip() else ""
         if scheme.lower() != "digest":
-            return f"{scheme} <redacted>".strip()
+            shown = scheme if scheme.lower() in _LOGGED_SCHEMES else ""
+            return f"{shown} <redacted>".strip()
         parts = []
         for pname, pvalue in parse_auth_params(value):
             if pname.lower() == "response":
                 pvalue = "<redacted>"
-            parts.append(f'{pname}="{pvalue}"')
+            parts.append(f'{scrub(pname, password)}="{scrub(pvalue, password)}"')
         return f"{scheme} " + ", ".join(parts)
-    return value
+    return scrub(value, password)
 
 
 @dataclass

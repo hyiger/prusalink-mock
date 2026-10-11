@@ -57,3 +57,14 @@ def test_captures_keep_their_line_endings():
     out = subprocess.run([git, "check-attr", "text", "--", *map(str, files)], cwd=ROOT, capture_output=True,
                          text=True, check=True).stdout
     assert out.count(": text: unset") == len(files), out
+
+
+def test_no_signal_that_makes_a_crash_report():
+    """On macOS each process that dies from one of these gets a crash report and a
+    "quit unexpectedly" dialog, so neither the mock nor its tests send them."""
+    names = ["SIG" + n for n in ("QUIT", "ABRT", "SEGV", "BUS", "ILL", "FPE", "TRAP", "SYS")]
+    names += ["os." + "abort", "raise_" + "signal"]
+    for path in sorted((ROOT / "src").rglob("*.py")) + sorted(TESTS.rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        for name in names:
+            assert name not in text, f"{path.relative_to(ROOT)} uses {name}"

@@ -13,14 +13,46 @@ from typing import Optional, Sequence
 from . import __version__
 from .api import MockPrinter
 from .core import MockCore
-from .state import DEFAULT_SCENARIO, ScenarioError, list_scenarios
+from .state import DEFAULT_SCENARIO, ScenarioError, list_scenarios, password_errors
+
+
+class _UsageError(Exception):
+    """A bad option value; main() prints it and exits with 2."""
 
 
 def _read_password(args: argparse.Namespace) -> Optional[str]:
+    """The password from --password-file or --password, checked like a scenario's.
+
+    The file may start with a UTF-8 byte order mark (PowerShell 5.1 writes one)
+    and end with a line break. An empty file is refused: it would turn login off
+    without a word, which is what --scenario login-disabled is for.
+    """
     if args.password_file is not None:
-        with open(args.password_file, encoding="utf-8") as fh:
-            return fh.read().rstrip("\r\n")
-    return args.password
+        try:
+            with open(args.password_file, encoding="utf-8-sig") as fh:
+                password = fh.read().rstrip("\r\n")
+        except UnicodeDecodeError:
+            raise _UsageError(f"--password-file {args.password_file}: not UTF-8 text") from None
+        if not password:
+            raise _UsageError(f"--password-file {args.password_file} is empty "
+                              "(for login disabled use --scenario login-disabled or --password '')")
+        source = "--password-file"
+    else:
+        password, source = args.password, "--password"
+    errors = password_errors(password) if password is not None else []
+    if errors:
+        raise _UsageError(f"{source}: {errors[0].split(': ', 1)[1]}")
+    return password
+
+
+def _port(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        value = -1
+    if not 0 <= value <= 65535:
+        raise argparse.ArgumentTypeError(f"must be a port number 0..65535, not {text!r}")
+    return value
 
 
 def _password_note(args: argparse.Namespace, password: str) -> str:
@@ -75,6 +107,49 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+# Forwarded to the command as they arrive. Only signals that ask a process to
+# end: nothing that makes a core dump or a crash report.
+FORWARDED_SIGNALS = ("SIGTERM", "SIGHUP")
+INTERRUPT_GRACE_S = 1.0
+INTERRUPT_WAIT_S = 10.0
+TERMINATE_WAIT_S = 5.0
+
+
+def _wait_interrupted(proc: subprocess.Popen) -> int:
+    """Wait for the command after plmock got SIGINT; returns its exit status.
+
+    A Ctrl-C in a terminal reaches the whole process group, the command
+    included, so it first gets a moment to end on its own. A SIGINT sent to
+    plmock alone is then passed on, so the command ends either way. A command
+    that still runs gets SIGTERM, and at last SIGKILL. Another Ctrl-C moves
+    on to the next step.
+    """
+    steps = [(None, INTERRUPT_GRACE_S), (signal.SIGTERM, TERMINATE_WAIT_S)]
+    if os.name == "posix":  # elsewhere Ctrl-C reaches every process on the console
+        steps.insert(1, (signal.SIGINT, INTERRUPT_WAIT_S))
+    for sig, timeout in steps:
+        if sig is not None and proc.poll() is None:
+            proc.send_signal(sig)
+        try:
+            return proc.wait(timeout=timeout)
+        except (subprocess.TimeoutExpired, KeyboardInterrupt):
+            continue
+    proc.kill()
+    return proc.wait()
+
+
+def _end(proc: subprocess.Popen) -> None:
+    """Stop the command if it still runs: SIGTERM, then SIGKILL if it doesn't end."""
+    if proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=TERMINATE_WAIT_S)
+    except (subprocess.TimeoutExpired, KeyboardInterrupt):
+        proc.kill()
+        proc.wait()
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     cmd = list(args.cmd)
     if cmd and cmd[0] == "--":
@@ -86,7 +161,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                           log_file=args.log_file, frozen_clock=args.frozen_clock)
     printer.start()
     proc: Optional[subprocess.Popen] = None
-    previous = None
+    previous: dict = {}
     try:
         env = dict(os.environ)
         env.update(PRUSALINK_MOCK_URL=printer.url, PRUSALINK_MOCK_CONTROL=printer.control_url,
@@ -96,32 +171,28 @@ def cmd_run(args: argparse.Namespace) -> int:
         except OSError as exc:
             print(f"plmock run: cannot start {cmd[0]}: {exc.strerror or exc}", file=sys.stderr)
             return 127
-        if hasattr(signal, "SIGTERM"):
-            def forward(signum, frame):  # pragma: no cover - exercised by signals only
-                proc.terminate()
+        # A signal meant to end plmock ends the command too, so it can't outlive
+        # the mock. SIGINT arrives as KeyboardInterrupt, below.
+        def forward(signum, frame):  # pragma: no cover - exercised by signals only
+            proc.send_signal(signum)
+        for name in FORWARDED_SIGNALS:
+            sig = getattr(signal, name, None)
+            if sig is None:
+                continue
             try:
-                previous = signal.signal(signal.SIGTERM, forward)
+                previous[sig] = signal.signal(sig, forward)
             except ValueError:
-                previous = None  # not the main thread
-        while True:
-            try:
-                rc = proc.wait()
-                break
-            except KeyboardInterrupt:
-                # The child got the same Ctrl-C; give it a moment to finish.
-                try:
-                    rc = proc.wait(timeout=10)
-                except (subprocess.TimeoutExpired, KeyboardInterrupt):
-                    proc.kill()
-                    rc = proc.wait()
-                break
+                break  # not the main thread
+        try:
+            rc = proc.wait()
+        except KeyboardInterrupt:
+            rc = _wait_interrupted(proc)
         return 128 - rc if rc < 0 else rc
     finally:
-        if proc is not None and proc.poll() is None:
-            proc.kill()
-            proc.wait()
-        if previous is not None:
-            signal.signal(signal.SIGTERM, previous)
+        if proc is not None:
+            _end(proc)
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
         printer.stop()
 
 
@@ -139,8 +210,8 @@ def build_parser() -> argparse.ArgumentParser:
     serve = sub.add_parser("serve", help="run the mock in the foreground")
     _add_common(serve)
     serve.add_argument("--host", default="127.0.0.1", help="printer port address (default: 127.0.0.1)")
-    serve.add_argument("--port", type=int, default=8088, help="printer port (default: 8088, 0 = any free port)")
-    serve.add_argument("--control-port", type=int, default=8089,
+    serve.add_argument("--port", type=_port, default=8088, help="printer port (default: 8088, 0 = any free port)")
+    serve.add_argument("--control-port", type=_port, default=8089,
                        help="control API port on 127.0.0.1 (default: 8089, 0 = any free port)")
     serve.set_defaults(func=cmd_serve)
 
@@ -159,6 +230,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)
+    except _UsageError as exc:
+        print(f"plmock: {exc}", file=sys.stderr)
+        return 2
     except ScenarioError as exc:
         print("plmock: invalid scenario:", file=sys.stderr)
         for err in exc.errors:

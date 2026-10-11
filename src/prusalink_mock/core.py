@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import json
-import math
 import os
 import socket
 import sys
@@ -20,7 +18,7 @@ from typing import Any, Optional
 
 from . import auth as authmod
 from . import routes, state as statemod, wire
-from .faults import FaultSet
+from .faults import FaultRule, FaultSet
 from .reqlog import RequestLog
 from .storage import Storage
 from .wire import ERROR_CLOSE, KEEP, Request, Response
@@ -84,8 +82,11 @@ class MockCore:
                  control_host: str = "127.0.0.1", control_port: int = 8089, password: Optional[str] = None,
                  seed: Optional[int] = None, log_file: Optional[str] = None, epoch: Optional[float] = None,
                  frozen_clock: bool = False, max_upload_bytes: int = MAX_UPLOAD_BYTES) -> None:
-        if password is not None and len(password.encode("utf-8")) > statemod.PASSWORD_MAX:
-            raise statemod.ScenarioError([f"password: longer than the firmware's {statemod.PASSWORD_MAX} bytes"])
+        if password is not None and statemod.password_errors(password):
+            raise statemod.ScenarioError(statemod.password_errors(password))
+        for name, value in (("port", port), ("control_port", control_port)):
+            if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 65535:
+                raise ValueError(f"{name} must be 0..65535, not {value!r}")
         self.password_override = password
         self.scenario_ref = scenario
         self.base_state = self._with_password(statemod.load(scenario))
@@ -112,9 +113,13 @@ class MockCore:
     # --- lifecycle -------------------------------------------------------------
 
     async def start(self) -> None:
+        """Bind both ports; RuntimeError if they are bound already. stop() allows a new start()."""
         from .control import handle_control
 
+        if self._servers:
+            raise RuntimeError("the mock is already started")
         self._stop_requested = asyncio.Event()
+        self.log.open()
         try:
             printer = await asyncio.start_server(self._handle_printer, self.host, self.port)
             self._servers.append(printer)
@@ -191,17 +196,30 @@ class MockCore:
     def get_state(self) -> dict:
         return statemod.public(self.state)
 
+    def _keep_password(self, doc: dict, auth: Any) -> dict:
+        """``doc`` with the current password unless ``auth`` sets one.
+
+        GET /_mock/state leaves the password out, so a document without one keeps it,
+        and so does ``"auth": null``: a test can't switch the password by accident.
+        """
+        if auth is None or (isinstance(auth, dict) and auth.get("password") is None):
+            current = doc.get("auth") if isinstance(doc.get("auth"), dict) else {}
+            doc = dict(doc, auth=dict(current, password=self.password))
+        return doc
+
     def set_state(self, doc: Any) -> dict:
-        """Replace the state. Without an ``auth`` key the current password is kept."""
-        if isinstance(doc, dict) and "auth" not in doc:
-            doc = dict(doc, auth={"password": self.password})
+        """Replace the state. Unless the document sets a password, the current one is kept."""
+        if isinstance(doc, dict):
+            doc = self._keep_password(doc, doc.get("auth"))
         self.state = statemod.normalize(doc)
         return self.get_state()
 
     def patch_state(self, patch: Any) -> dict:
+        """Merge patch the state. Unless the patch sets a password, the current one is kept."""
         if not isinstance(patch, dict):
             raise statemod.ScenarioError(["/: a patch must be a JSON object"])
-        self.state = statemod.normalize(statemod.merge_patch(self.state, patch))
+        merged = statemod.merge_patch(self.state, patch)
+        self.state = statemod.normalize(self._keep_password(merged, patch.get("auth")))
         return self.get_state()
 
     def set_tool(self, key: str, tool: Any) -> dict:
@@ -257,8 +275,7 @@ class MockCore:
         self.nonces.reboot()
 
     def advance_clock(self, seconds: float) -> None:
-        if not math.isfinite(seconds) or seconds < 0:
-            raise ValueError(f"seconds must be a finite, non-negative number, not {seconds!r}")
+        """Move the uptime and wall clock on; ValueError leaves the clock as it was."""
         self.clock.advance(seconds)
 
     # --- printer port ------------------------------------------------------------
@@ -340,7 +357,8 @@ class MockCore:
         }
 
     def _log(self, entry: dict, req: Request, auth: Optional[authmod.AuthResult], started: float) -> None:
-        entry["headers"] = [[n, authmod.redact_header(n, v, auth)] for n, v in req.headers]
+        entry["headers"] = [[authmod.scrub(n, self.password), authmod.redact_header(n, v, auth, self.password)]
+                            for n, v in req.headers]
         entry["duration_ms"] = round((time.monotonic() - started) * 1000, 1)
         self.log.add(entry)
 
@@ -375,7 +393,7 @@ class MockCore:
             else:
                 if routes.is_protected(req.target):
                     auth = authmod.check(req.headers, req.method, req.target, self.password, self.nonces)
-                    entry["auth"] = auth.log_dict()
+                    entry["auth"] = auth.log_dict(self.password)
                 auth_state = "none" if auth is None or not auth.present else ("ok" if auth.ok else "fail")
                 rule = self.faults.pick(req.method, req.path(), auth_state)
                 action = rule.action if rule else {}
@@ -399,7 +417,7 @@ class MockCore:
                 if resp is None:
                     resp = await self._route(req, auth, inp, entry)
                 if kind == "malformed":
-                    resp = self._malformed(req, resp, action)
+                    resp = self._malformed(req, resp, rule)
                 if kind == "drop":  # mid_body
                     data = resp.wire()
                     cut = len(resp.head) + action.get("after_bytes", (len(data) - len(resp.head)) // 2)
@@ -478,7 +496,8 @@ class MockCore:
             return Response(status, head, body, after=handling, content_type=ctype)
         return wire.status_page(status, handling, req.accepts_json, action.get("message", ""))
 
-    def _malformed(self, req: Request, resp: Response, action: dict) -> Response:
+    def _malformed(self, req: Request, resp: Response, rule: FaultRule) -> Response:
+        action = rule.action
         mode = action["mode"]
         keep = resp.after == KEEP
         if mode == "html":
@@ -487,8 +506,8 @@ class MockCore:
             n = action.get("keep_bytes", len(resp.body) // 2)
             out = wire.json_response(resp.body[:n], keep)
         else:  # wrong_shape
-            if "body" in action:
-                body = json.dumps(action["body"], separators=(",", ":")).encode("utf-8")
+            if rule.body_json is not None:
+                body = rule.body_json
             elif resp.is_json:
                 body = b"[" + resp.body + b"]"
             else:

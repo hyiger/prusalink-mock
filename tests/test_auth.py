@@ -171,13 +171,13 @@ def test_redaction_never_shows_secrets():
 
 
 def test_reboot_keeps_the_wall_clock():
-    clock = Clock(frozen=True, epoch=1_000_000)
+    clock = Clock(frozen=True, epoch=1_700_000_000)
     clock.advance(3600.5)
-    assert clock.now() == 1_003_600 and clock.uptime() == 3600
+    assert clock.now() == 1_700_003_600 and clock.uptime() == 3600
     clock.reboot()
-    assert clock.uptime() == 0 and clock.now() == 1_003_600
+    assert clock.uptime() == 0 and clock.now() == 1_700_003_600
     clock.advance(10)
-    assert clock.now() == 1_003_610
+    assert clock.now() == 1_700_003_610
 
 
 def test_digest_client_repr_hides_the_password():

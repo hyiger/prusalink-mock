@@ -13,11 +13,12 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import threading
 from typing import Any, Callable, Optional
 
 from .core import MockCore
-from .state import DEFAULT_SCENARIO
+from .state import DEFAULT_SCENARIO, key_text
 
 CALL_TIMEOUT_S = 30.0
 
@@ -37,6 +38,10 @@ class MockPrinter:
     # --- lifecycle -------------------------------------------------------------
 
     def start(self) -> "MockPrinter":
+        """Start serving; RuntimeError if this printer is already running."""
+        if not self.stopped:
+            raise RuntimeError("the mock is already running")
+        self._error = None
         ready = threading.Event()
 
         def run() -> None:
@@ -127,10 +132,10 @@ class MockPrinter:
         return self._call(self.core.patch_state, patch)
 
     def set_tool(self, key: int | str, tool: dict) -> dict:
-        return self._call(self.core.set_tool, str(key), tool)
+        return self._call(self.core.set_tool, key_text(key), tool)
 
     def remove_tool(self, key: int | str) -> dict:
-        return self._call(self.core.remove_tool, str(key))
+        return self._call(self.core.remove_tool, key_text(key))
 
     def load_scenario(self, name: str) -> dict:
         return self._call(self.core.load_scenario, name)
@@ -148,7 +153,8 @@ class MockPrinter:
         self._call(self.core.faults.clear)
 
     def requests(self, since: int = 0) -> list[dict]:
-        return self._call(self.core.log.since, since)
+        """Log entries after ``since``, as copies."""
+        return self._call(lambda: copy.deepcopy(self.core.log.since(since)))
 
     def clear_requests(self) -> None:
         self._call(self.core.log.clear)

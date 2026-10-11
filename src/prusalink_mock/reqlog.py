@@ -13,7 +13,14 @@ class RequestLog:
     def __init__(self, path: Optional[str] = None, max_entries: int = MAX_ENTRIES) -> None:
         self.entries: deque[dict] = deque(maxlen=max_entries)
         self.last_seq = 0
-        self._fh: Optional[IO[str]] = open(path, "a", encoding="utf-8") if path else None
+        self.path = path
+        self._fh: Optional[IO[str]] = None
+        self.open()
+
+    def open(self) -> None:
+        """Open the log file for appending, if there is one and it is closed."""
+        if self.path and self._fh is None:
+            self._fh = open(self.path, "a", encoding="utf-8")
 
     def add(self, entry: dict) -> None:
         self.last_seq += 1
@@ -24,8 +31,9 @@ class RequestLog:
             self._fh.flush()
 
     def since(self, seq: int = 0, limit: Optional[int] = None) -> list[dict]:
+        """Entries after ``seq``, the oldest ``limit`` of them when given."""
         out = [e for e in self.entries if e["seq"] > seq]
-        return out[:limit] if limit else out
+        return out[:limit] if limit is not None else out
 
     def clear(self) -> None:
         self.entries.clear()

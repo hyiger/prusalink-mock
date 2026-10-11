@@ -72,7 +72,7 @@ def contract_target(request: pytest.FixtureRequest):
     pw_file = request.config.getoption("--password-file")
     if not pw_file:
         pytest.exit("--target needs --password-file", returncode=4)
-    with open(pw_file, encoding="utf-8") as fh:
+    with open(pw_file, encoding="utf-8-sig") as fh:
         password = Secret(fh.read().rstrip("\r\n"))
     yield Target(parts.hostname or "127.0.0.1", parts.port or 80, password, False, allow_writes)
 

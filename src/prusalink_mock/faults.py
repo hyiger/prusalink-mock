@@ -7,9 +7,14 @@ and still has hits left fires.
 
 from __future__ import annotations
 
+import copy
 import fnmatch
+import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
+
+from .state import MAX_DEPTH, check_depth, key_text
 
 HANG_CAP_S = 30.0
 
@@ -39,10 +44,12 @@ class FaultRule:
     times: Optional[int] = None
     seen: int = 0
     hits: int = 0
+    body_json: Optional[bytes] = None  # a wrong_shape action's ``body``, encoded once
 
     def describe(self) -> dict:
-        return {"id": self.id, "match": self.match, "action": self.action, "skip": self.skip,
-                "times": self.times, "seen": self.seen, "hits": self.hits}
+        """The rule as a new dict, so callers can't change the rule through it."""
+        return copy.deepcopy({"id": self.id, "match": self.match, "action": self.action, "skip": self.skip,
+                              "times": self.times, "seen": self.seen, "hits": self.hits})
 
     def matches(self, method: str, path: str, auth_state: str) -> bool:
         m = self.match
@@ -57,10 +64,29 @@ class FaultRule:
         return True
 
 
-def _int(value: Any, name: str, lo: int, hi: Optional[int] = None) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < lo or (hi is not None and value > hi):
-        raise FaultError(f"{name} must be an integer >= {lo}" + (f" and <= {hi}" if hi is not None else ""))
+# Counts are capped so a rule always prints back as JSON: Python refuses to turn
+# an int of more than 4300 digits into text.
+COUNT_MAX = 2**31 - 1
+
+
+def _int(value: Any, name: str, lo: int, hi: int = COUNT_MAX) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not lo <= value <= hi:
+        raise FaultError(f"{name} must be an integer in {lo}..{hi}")
     return value
+
+
+def _text(action: dict, key: str, single_line: bool) -> None:
+    """A string the response can carry: encodable as UTF-8 and, for a status page
+    message, free of the control characters that would make a JSON page invalid."""
+    value = action[key]
+    if not isinstance(value, str):
+        raise FaultError(f"action.{key} must be a string")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise FaultError(f"action.{key} must be valid Unicode text (no lone surrogates)") from None
+    if single_line and re.search(r"[\x00-\x1f\x7f]", value):
+        raise FaultError(f"action.{key} must not contain control characters")
 
 
 def parse_rule(doc: Any, rule_id: int) -> FaultRule:
@@ -69,13 +95,13 @@ def parse_rule(doc: Any, rule_id: int) -> FaultRule:
         raise FaultError("a fault rule must be a JSON object")
     for key in doc:
         if key not in ("match", "skip", "times", "action"):
-            raise FaultError(f"unknown key {key!r}")
+            raise FaultError(f"unknown key {key_text(key)!r}")
     match = doc.get("match", {})
     if not isinstance(match, dict):
         raise FaultError("match must be an object")
     for key, value in match.items():
         if key not in MATCH_KEYS:
-            raise FaultError(f"unknown match key {key!r} (known: {', '.join(MATCH_KEYS)})")
+            raise FaultError(f"unknown match key {key_text(key)!r} (known: {', '.join(MATCH_KEYS)})")
         if not isinstance(value, str):
             raise FaultError(f"match.{key} must be a string")
     if match.get("auth", "any") not in AUTH_STATES:
@@ -85,17 +111,21 @@ def parse_rule(doc: Any, rule_id: int) -> FaultRule:
     if times is not None:
         times = _int(times, "times", 1)
     action = doc.get("action")
-    if not isinstance(action, dict) or action.get("type") not in ACTIONS:
+    if not isinstance(action, dict) or not isinstance(action.get("type"), str) or action["type"] not in ACTIONS:
         raise FaultError(f"action.type must be one of {', '.join(ACTIONS)}")
     kind = action["type"]
     for key in action:
         if key != "type" and key not in ACTIONS[kind]:
-            raise FaultError(f"unknown key {key!r} for a {kind} action")
+            raise FaultError(f"unknown key {key_text(key)!r} for a {kind} action")
+    body_json = None
     if kind == "status":
         _int(action.get("status"), "action.status", 100, 599)
-        for key in ("message", "body", "content_type"):
-            if key in action and not isinstance(action[key], str):
-                raise FaultError(f"action.{key} must be a string")
+        for key in ("message", "body"):
+            if key in action:
+                _text(action, key, single_line=key == "message")
+        if "content_type" in action and not (isinstance(action["content_type"], str)
+                                             and re.fullmatch(r"[\x20-\x7e]+", action["content_type"])):
+            raise FaultError("action.content_type must be printable ASCII on one line (it is a header value)")
         if "close" in action and not isinstance(action["close"], bool):
             raise FaultError("action.close must be true or false")
     elif kind == "malformed":
@@ -103,6 +133,15 @@ def parse_rule(doc: Any, rule_id: int) -> FaultRule:
             raise FaultError(f"action.mode must be one of {', '.join(MALFORMED_MODES)}")
         if "keep_bytes" in action:
             _int(action["keep_bytes"], "action.keep_bytes", 0)
+        if "body" in action:
+            try:
+                check_depth(action["body"])
+            except ValueError:
+                raise FaultError(f"action.body nests deeper than {MAX_DEPTH} levels") from None
+            try:
+                body_json = json.dumps(action["body"], separators=(",", ":"), allow_nan=False).encode("utf-8")
+            except (TypeError, ValueError) as exc:
+                raise FaultError(f"action.body must be a JSON value: {exc}") from None
     elif kind == "delay":
         _int(action.get("ms"), "action.ms", 0, 600000)
     elif kind == "hang":
@@ -114,7 +153,8 @@ def parse_rule(doc: Any, rule_id: int) -> FaultRule:
             raise FaultError(f"action.when must be one of {', '.join(DROP_WHEN)}")
         if "after_bytes" in action:
             _int(action["after_bytes"], "action.after_bytes", 0)
-    return FaultRule(id=rule_id, match=dict(match), action=dict(action), skip=skip, times=times)
+    return FaultRule(id=rule_id, match=dict(match), action=copy.deepcopy(action), skip=skip, times=times,
+                     body_json=body_json)
 
 
 class FaultSet:
