@@ -88,6 +88,7 @@ class Request:
     create_folder: bool = False
     boundary: str = ""
     if_none_match: int = 0
+    url_len: int = 0  # bytes of the URL as sent
 
     def can_keep_alive(self) -> bool:
         """RequestParser::can_keep_alive (req_parser.cpp:265-267)."""
@@ -435,6 +436,7 @@ class HeadParser:
             self._end_header()  # a header cut short by the end of input
             self.state = "h_start"
         req.headers = list(self.headers)
+        req.url_len = self._url_len
         if self._url_len > MAX_URL_LEN:
             req.error = 414
         _apply_headers(req)
@@ -458,10 +460,11 @@ def _apply_headers(req: Request) -> None:
             elif _prefix(value, "keep-alive"):
                 req.connection = "keep-alive"
         elif lname == "content-length":
-            # Every byte of every Content-Length value is a digit to the parser.
+            # Every byte of every Content-Length value is a digit to the parser, and
+            # the sum is a size_t, 32 bits on the printer (req_parser.cpp:175-180, req_parser.h:54).
             cl = req.content_length or 0
             for ch in value:
-                cl = (cl * 10 + (ord(ch) - 48)) & 0xFFFFFFFFFFFFFFFF
+                cl = (cl * 10 + (ord(ch) - 48)) & 0xFFFFFFFF
             req.content_length = cl
         elif lname == "accept":
             if _prefix(value, "application/json"):
@@ -483,10 +486,11 @@ def _apply_headers(req: Request) -> None:
             for part in value.split(";")[1:]:
                 part = part.lstrip(" \t")
                 if part.lower().startswith("boundary="):
-                    boundary = re.split(r"[ \t;]", part[len("boundary="):], maxsplit=1)[0]
-                    req.boundary = boundary
-                    # The boundary shares the URL buffer (req_parser.cpp:104-111).
-                    if len(boundary) > MAX_URL_LEN - min(len(req.target), MAX_URL_LEN):
+                    # Every boundary byte is appended after the URL in the URL buffer and
+                    # the count is never reset, so all boundary= values of all
+                    # Content-Type headers add up (req_parser.cpp:107-114, req_parser.h:115-158).
+                    req.boundary += re.split(r"[ \t;]", part[len("boundary="):], maxsplit=1)[0]
+                    if len(req.boundary) > MAX_URL_LEN - min(req.url_len, MAX_URL_LEN):
                         req.error = 431
 
 

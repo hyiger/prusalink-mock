@@ -97,8 +97,19 @@ def _join(fn: list[str]) -> str:
     return f"{body}.{ext}" if ext else body
 
 
+class NoShortName(Exception):
+    """All 99 numbered short names are taken: dir_register gives up with FR_DENIED
+    (ff.c:2483-2490), which the firmware reports as EACCES (filesystem_fatfs.cpp:84-85).
+
+    Not an OSError: that would pass for a socket error on the printer port.
+    """
+
+
 def short_name(lfn: str, existing: Iterable[str]) -> str:
-    """Short name for ``lfn`` in a directory whose short names are ``existing``."""
+    """Short name for ``lfn`` in a directory whose short names are ``existing``.
+
+    Raises NoShortName when ``~1`` to ``~99`` are all taken.
+    """
     taken = {name.upper() for name in existing}
     fn, lossy = _base(lfn)
     if not lossy:
@@ -107,4 +118,4 @@ def short_name(lfn: str, existing: Iterable[str]) -> str:
         candidate = _join(_numbered(fn, lfn, seq))
         if candidate.upper() not in taken:
             return candidate
-    raise FileExistsError("too many short name collisions")
+    raise NoShortName(lfn)

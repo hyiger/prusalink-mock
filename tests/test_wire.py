@@ -325,3 +325,38 @@ def test_a_mock_bug_answers_500(printer, monkeypatch):
         r = conn.request("GET", "/api/version", key(printer))
     assert r.status == 500 and r.closed and b"prusalink-mock bug" in r.body
     assert printer.requests()[-1]["error"] == "prusalink-mock bug: RuntimeError: boom"
+
+
+@pytest.mark.parametrize("content_types,status", [
+    (["multipart/form-data; boundary=" + "b" * 40] * 2, 431),
+    (["multipart/form-data; boundary=" + "b" * 40 + "; boundary=" + "c" * 40], 431),
+    (["multipart/form-data; boundary=" + "b" * 71], 410),
+    (["multipart/form-data; boundary=" + "b" * 72], 431),
+])
+def test_boundaries_add_up_in_the_url_buffer(printer, content_types, status):
+    """Every boundary byte goes after the URL and the count is never reset (req_parser.cpp:107-114)."""
+    target = "/api/files/local?" + "q" * 80  # 97 bytes: 71 left of the 168
+    with Conn("127.0.0.1", printer.port) as conn:
+        r = conn.request("POST", target, key(printer) + [("Content-Type", ct) for ct in content_types]
+                         + [("Content-Length", "0")])
+    assert r.status == status
+
+
+def test_job_id_is_read_like_strtol():
+    """get_job_id: a 34-byte buffer, then strtol (prusa_link_api_v1.cpp:42-50, str_utils.cpp:102-128)."""
+    from prusalink_mock import MockPrinter
+    with MockPrinter("indx-printing") as printer:
+        def job(method, target):
+            with Conn("127.0.0.1", printer.port) as conn:
+                return conn.request(method, target, key(printer)).status
+
+        assert job("PUT", "/api/v1/job/+42/pause") == 204
+        assert job("PUT", "/api/v1/job/\x0b42/resume") == 204
+        assert job("PUT", "/api/v1/job/\x0c\r42/pause") == 204
+        assert job("PUT", "/api/v1/job/-42/resume") == 404
+        assert job("DELETE", "/api/v1/job/42?" + "x" * 40) == 400
+        assert job("DELETE", "/api/v1/job/42/" + "y" * 40) == 400
+        assert job("DELETE", "/api/v1/job/" + "0" * 33 + "42") == 400
+        assert job("DELETE", "/api/v1/job/+ 42") == 400
+        assert job("GET", "/api/v1/job") == 200  # still printing
+        assert job("DELETE", "/api/v1/job/" + "0" * 31 + "42") == 204  # 33 bytes fit

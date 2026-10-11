@@ -51,8 +51,20 @@ def _get_only(req: Request, body: Callable[[], bytes]) -> Response:
     return wire.status_page(405, ERROR_CLOSE, req.accepts_json)
 
 
+# What strtol takes: leading isspace() in the C locale, a sign, then digits.
+_STRTOL = r"[ \t\n\v\f\r]*([+-]?[0-9{}]+)"
+_STRTOL_10 = re.compile(_STRTOL.format(""))
+_STRTOL_16 = re.compile(_STRTOL.format("a-fA-F"))
+
+
 def uri_filename(target: str) -> Optional[str]:
-    """RequestParser::uri_filename (req_parser.cpp:273-307) plus http::url_decode."""
+    """RequestParser::uri_filename (req_parser.cpp:273-307) plus http::url_decode.
+
+    url_decode reads each %XX with from_chars_light(int, base 16) over the two
+    bytes after the % (url_decode.cpp:16-29, str_utils.cpp:102-128), which is
+    strtol: white space and a sign come first, so "%+4" is 0x04 and "%-1" is
+    0xFF (cast to char).
+    """
     raw = target.split("?", 1)[0]
     out = []
     i = 0
@@ -61,10 +73,10 @@ def uri_filename(target: str) -> Optional[str]:
         if ch == "+":
             out.append(" ")
         elif ch == "%":
-            m = re.match(r"[0-9a-fA-F]{1,2}", raw[i + 1:i + 3])
+            m = _STRTOL_16.match(raw[i + 1:i + 3].split("\0", 1)[0])
             if not m:
                 return None
-            out.append(chr(int(m.group(0), 16)))
+            out.append(chr(int(m.group(1), 16) & 0xFF))
             i += 2
         else:
             out.append(ch)
@@ -161,6 +173,22 @@ async def _v1(core: "MockCore", req: Request, suffix: str, inp: "Input", entry: 
     return _page(req, 404)
 
 
+def _job_id(job_suffix: str) -> Optional[int]:
+    """get_job_id (prusa_link_api_v1.cpp:42-50): from_chars_light into an int.
+
+    The whole suffix is copied into a 34-byte buffer first, so a longer one
+    fails; strtol then skips white space and takes a sign and digits, and the
+    rest is ignored (str_utils.cpp:102-128, 172-176).
+    """
+    if len(job_suffix) > 33:
+        return None
+    m = _STRTOL_10.match(job_suffix.split("\0", 1)[0])
+    if not m:
+        return None
+    value = int(m.group(1))
+    return value if -(2 ** 31) <= value < 2 ** 31 else None
+
+
 def _job_command(core: "MockCore", req: Request, job_suffix: str) -> Response:
     """PUT /api/v1/job/{id}/pause|resume, DELETE /api/v1/job/{id} (prusa_link_api_v1.cpp:42-155).
 
@@ -170,12 +198,12 @@ def _job_command(core: "MockCore", req: Request, job_suffix: str) -> Response:
     changes are immediate; the firmware passes through pausing and stopping
     states first.
     """
-    m = re.match(r"-?[0-9]+", job_suffix)
-    if not m or not -(2 ** 31) <= int(m.group(0)) < 2 ** 31:
+    job_id = _job_id(job_suffix)
+    if job_id is None:
         return _page(req, 400)
     state = core.state
     printer = state["printer"]
-    if int(m.group(0)) != printer["job_id"]:
+    if job_id != printer["job_id"]:
         return _page(req, 404)
     if req.method == "PUT":
         slash = job_suffix.find("/")
@@ -296,9 +324,15 @@ def _print_file(core: "MockCore", req: Request, filename: str, entry: dict) -> R
 
 
 def _create_folder(core: "MockCore", req: Request, filename: str) -> Response:
-    """create_folder (prusa_api_helpers.cpp:115-126)."""
+    """create_folder (prusa_api_helpers.cpp:115-126): mkdir, where EEXIST is 409 and any
+    other error 500. A name FatFS refuses is FR_INVALID_NAME (ff.c:2822-2828); a
+    control character or a backslash would make another name, as for uploads."""
+    if not core.state["storage"]["available"]:
+        return _page(req, 500, "Error creating directory")
+    if _name_not_modeled(filename):
+        return _not_modeled(req)
     path = _as_text(filename)
-    if path is None or not core.state["storage"]["available"]:
+    if path is None or any(_bad_component(c) for c in filename.split("/")):
         return _page(req, 500, "Error creating directory")
     result = core.storage.mkdir(path)
     if result == "exists":
@@ -330,6 +364,11 @@ def _split(filename: str) -> tuple[list[str], str]:
     return folders, base
 
 
+# try_rename's answer when rename() fails with anything but EISDIR or ENOTDIR
+# (gcode_upload.cpp:224-238), as when every numbered short name is taken: FR_DENIED, EACCES.
+_NO_SHORT_NAME = "Filename contains invalid characters"
+
+
 def _check_filename(core: "MockCore", req: Request, filename: str) -> Optional[tuple[int, str]]:
     """GcodeUpload::check_filename (gcode_upload.cpp:334-377), run on the first body bytes."""
     folders, base = _split(filename)
@@ -352,6 +391,8 @@ def _check_filename(core: "MockCore", req: Request, filename: str) -> Optional[t
         return 404, "Destination directory does not exist"
     if core.storage.kind(_as_text(filename)) is not None:
         return 409, "File already exists"
+    if not core.storage.short_name_free(_as_text(filename)):
+        return 422, _NO_SHORT_NAME
     return None
 
 
@@ -384,6 +425,8 @@ def _finish_upload(core: "MockCore", req: Request, filename: str, data: bytes, e
         return fail(409, "Is a directory or ongoing transfer" if req.overwrite else "File already exists")
     stored = core.storage.store(path, data, core.clock.now(), print_after_upload=req.print_after_upload,
                                 overwrite=req.overwrite)
+    if stored is None:
+        return fail(422, _NO_SHORT_NAME)
     entry["upload"] = {
         "stored_as": stored.path,
         "sfn_path": stored.sfn_path,

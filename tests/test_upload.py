@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import socket
+import sys
 import time
 
 import pytest
@@ -332,3 +333,153 @@ def test_http_client_sees_the_print_entry(printer):
         c.close()
         assert [e["status"] for e in printer.requests() if e["route"] == "v1.files.print"]
         printer.clear_requests()
+
+
+# --- FatFS names (ff.c create_name, follow_path, dir_register) -------------------
+
+def _fill_short_names(printer, folder: str, lfn: str) -> None:
+    """Take all 99 numbered short names FatFS would try for ``lfn`` in ``folder``."""
+    from prusalink_mock import sfn
+    fn, lossy = sfn._base(lfn)
+    assert lossy
+    names = [sfn._join(sfn._numbered(fn, lfn, seq)) for seq in range(1, 100)]
+
+    def fill():
+        for name in names:
+            assert printer.core.storage.store(f"{folder}/{name}", b"x", 0, print_after_upload=False,
+                                              overwrite=False) is not None
+    printer._call(fill)
+
+
+def test_no_short_name_left_for_an_upload(printer):
+    """dir_register gives up after ~99 (FR_DENIED, EACCES): try_rename's 422 (gcode_upload.cpp:224-238)."""
+    _fill_short_names(printer, "/usb", "collide.gcode")
+    r = put(printer, "/api/v1/files/usb/collide.gcode", accept_json=True)  # the check file's rename
+    assert r.status == 422 and r.closed and not r.reset
+    assert r.body == b'{"title": "422: Unprocessable Entity","message":"Filename contains invalid characters"}'
+    r = put(printer, "/api/v1/files/usb/collide.gcode", headers=[("Overwrite", "?1")])  # the final rename
+    assert r.status == 422 and r.body == b"422: Unprocessable Entity\n\nFilename contains invalid characters\n"
+    assert len(printer.files()) == 99
+    assert [e["status"] for e in printer.requests()] == [422, 422]
+
+
+def test_no_short_name_left_for_a_folder(printer):
+    _fill_short_names(printer, "/usb", "collide dir")
+    r = put(printer, "/api/v1/files/usb/collide%20dir", b"", [("Create-Folder", "?1")])
+    assert r.status == 500 and b"Error creating directory" in r.body
+    r = put(printer, "/api/v1/files/usb/collide%20dir/x.gcode")  # make_dirs (path_utils.cpp:35-51)
+    assert r.status == 500 and b"Failed to create a folder" in r.body
+    assert all(e["status"] == 500 for e in printer.requests())
+
+
+def test_a_dot_folder_is_the_folder_itself(printer):
+    r = put(printer, "/api/v1/files/usb/./x.gcode")
+    assert r.status == 201 and json.loads(r.body)["refs"]["download"] == "/usb/X~1.GCO"
+    assert [f["path"] for f in printer.files()] == ["/usb/x.gcode"]
+    assert get(printer, "/api/v1/files/usb/x.gcode").status == 200
+    assert put(printer, "/api/v1/files/usb/sub/./y.gcode").status == 201
+    assert get(printer, "/api/v1/files/usb/sub/y.gcode").status == 200
+
+
+@pytest.mark.parametrize("folder", ["...", "%20", ".%20.", "a/%20%20"])
+def test_a_folder_name_with_nothing_left_is_refused(printer, folder):
+    """Trailing dots and spaces go; an empty name is FR_INVALID_NAME (ff.c:2851-2858)."""
+    r = put(printer, f"/api/v1/files/usb/{folder}/x.gcode")
+    assert r.status == 500 and b"Failed to create a folder" in r.body
+    r = put(printer, f"/api/v1/files/usb/{folder}", b"", [("Create-Folder", "?1")])
+    assert r.status == 500 and b"Error creating directory" in r.body
+    assert printer.files() == [] and printer._call(lambda: len(printer.core.storage.dirs)) <= 2
+
+
+@pytest.mark.parametrize("target", ["/api/v1/files/usb/.", "/api/v1/files/usb/../", "/api/v1/files/usb/dir/.",
+                                    "/api/v1/files/usb/dir/sub/../"])
+def test_create_folder_on_a_dot_entry_exists(printer, target):
+    assert put(printer, "/api/v1/files/usb/dir/sub", b"", [("Create-Folder", "?1")]).status == 500  # no dir yet
+    assert put(printer, "/api/v1/files/usb/dir", b"", [("Create-Folder", "?1")]).status == 201
+    assert put(printer, "/api/v1/files/usb/dir/sub", b"", [("Create-Folder", "?1")]).status == 201
+    r = put(printer, target, b"", [("Create-Folder", "?1")])
+    assert r.status == 409 and b"Already exists" in r.body
+
+
+def test_dot_entry_after_a_missing_folder(printer):
+    r = put(printer, "/api/v1/files/usb/nope/../", b"", [("Create-Folder", "?1")])
+    assert r.status == 500 and b"Error creating directory" in r.body
+
+
+@pytest.mark.parametrize("variant", ["dir.", "dir%20", "DIR..", "dir%20."])
+def test_trailing_dots_and_spaces_name_the_same_folder(printer, variant):
+    assert put(printer, "/api/v1/files/usb/dir/a.gcode").status == 201
+    r = put(printer, f"/api/v1/files/usb/{variant}/b.gcode")
+    assert r.status == 201 and json.loads(r.body)["refs"]["download"] == "/usb/DIR/B~1.GCO"
+    assert get(printer, "/api/v1/files/usb/DIR/B~1.GCO").status == 200
+    assert get(printer, "/api/v1/files/usb/dir/b.gcode").status == 200
+    assert sorted(f["path"] for f in printer.files()) == ["/usb/dir/a.gcode", "/usb/dir/b.gcode"]
+    assert get(printer, "/api/v1/files/usb/dir/b.gcode.").status == 200
+
+
+@pytest.mark.parametrize("name,status", [
+    ("a*b", 500), ("q%3fr", 500), ("c%3ad", 500), ("lt%3cgt%3e", 500), ("del%7f", 500), ("p%22q", 500),
+    ("ok/a%7cb", 500), ("x%01y", 501), ("m%5cn", 501), ("m\\n", 501),
+])
+def test_create_folder_checks_names_like_uploads(printer, name, status):
+    """mkdir with a character FatFS refuses fails (FR_INVALID_NAME, ff.c:2822-2828)."""
+    r = put(printer, f"/api/v1/files/usb/{name}", b"", [("Create-Folder", "?1")])
+    assert r.status == status
+    assert printer._call(lambda: len(printer.core.storage.dirs)) == 1
+
+
+def test_names_compare_one_character_at_a_time(printer):
+    """cmp_lfn folds each UTF-16 unit with ff_wtoupper; ß has no one-letter capital."""
+    assert put(printer, "/api/v1/files/usb/stra%C3%9Fe.gcode", b"one").status == 201
+    assert put(printer, "/api/v1/files/usb/strasse.gcode", b"two").status == 201
+    assert put(printer, "/api/v1/files/usb/%EF%AC%81le.gcode", b"three").status == 201
+    assert put(printer, "/api/v1/files/usb/file.gcode", b"four").status == 201
+    assert put(printer, "/api/v1/files/usb/STRASSE.GCODE", b"five").status == 409
+    assert json.loads(get(printer, "/api/v1/files/usb/strasse.gcode").body)["size"] == 3
+    assert printer.file_bytes("straße.gcode") == b"one" and printer.file_bytes("strasse.gcode") == b"two"
+
+
+@pytest.mark.parametrize("length,body,status", [("4294967299", b"G1\n", 201), ("4294967297", b"G", 201),
+                                                ("4294967296", b"", 501)])
+def test_content_length_is_32_bits(printer, length, body, status):
+    """size_t content_length on the STM32 (req_parser.h:54, req_parser.cpp:175-180)."""
+    with Conn("127.0.0.1", printer.port) as conn:
+        r = conn.request("PUT", "/api/v1/files/usb/w.gcode", [("X-Api-Key", printer.password),
+                                                              ("Content-Length", length)], body)
+    assert r.status == status
+    if status == 201:
+        assert printer.file_bytes("w.gcode") == body
+
+
+@pytest.mark.parametrize("escape,status", [
+    ("%-F%80%80%80", 201),  # 0xF1 0x80 0x80 0x80, U+40000
+    ("a%-1b", 404),  # 0xFF, not UTF-8, so FatFS refuses the name
+    ("a%+4b", 501),  # 0x04
+    ("a%\x0b4b", 501),  # 0x04 after a vertical tab
+    ("a%+", 404), ("a%-%41", 404),  # no digit: url_decode fails
+])
+def test_percent_escapes_read_like_strtol(printer, escape, status):
+    """url_decode reads %XX with strtol: white space and a sign come first (url_decode.cpp:16-29)."""
+    r = put(printer, f"/api/v1/files/usb/{escape}.gcode")
+    assert r.status == status
+    if status == 201:
+        assert printer.files()[0]["path"] == "/usb/\U00040000.gcode"
+
+
+def test_reset_mid_body_is_logged(printer):
+    """A reset (RST) partway through a body is an early close too."""
+    import struct
+    conn = Conn("127.0.0.1", printer.port)
+    conn.send(_upload_head(printer, "u.gcode", 1000) + b"G1")
+    deadline = time.monotonic() + 10
+    while printer._call(lambda: printer.core.upload_path) is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    linger = struct.pack("HH", 1, 0) if sys.platform == "win32" else struct.pack("ii", 1, 0)
+    conn.sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, linger)
+    conn.sock.close()
+    entries = []
+    while not entries and time.monotonic() < deadline:
+        time.sleep(0.02)
+        entries = [e for e in printer.requests() if e["method"] == "PUT"]
+    assert entries and entries[0]["error"] == "connection reset by the client" and entries[0]["close"] is True
+    assert printer.files() == [] and printer._call(lambda: printer.core.upload_path) is None

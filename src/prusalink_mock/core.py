@@ -436,13 +436,19 @@ class MockCore:
             if resp.after == ERROR_CLOSE:
                 await self._linger(inp, writer)
             return False
+        except (ConnectionError, OSError) as exc:
+            if not logged:  # the client reset the connection mid-request
+                entry["close"] = True
+                entry.setdefault("error", "connection reset by the client" if isinstance(exc, ConnectionResetError)
+                                 else f"connection error: {exc}")
+            raise
         finally:
             commit()
 
     async def _route(self, req: Request, auth: Optional[authmod.AuthResult], inp: Input, entry: dict) -> Response:
         try:
             return await routes.route(self, req, auth, inp, entry)
-        except (ConnectionError, OSError):
+        except ConnectionError:  # the client went away; _serve logs it
             raise
         except Exception as exc:  # a bug in the mock: answer 500 rather than close silently
             print("prusalink-mock: unexpected error while answering a request", file=sys.stderr)
