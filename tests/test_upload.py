@@ -98,6 +98,29 @@ def test_folders_are_created_with_short_names(printer):
     assert put(printer, "/api/v1/files/usb/My%20Prints/benchy_0.4n.bgcode/x.gcode").status == 409
 
 
+def test_a_short_name_stands_for_its_file(printer):
+    """FatFS matches each path component against the long and the short name (dir_find)."""
+    assert json.loads(put(printer, "/api/v1/files/usb/foobar-long.gcode", b"one").body)["name"] == "FOOBAR~1.GCO"
+    r = put(printer, "/api/v1/files/usb/FOOBAR~1.GCO", b"two")
+    assert r.status == 409 and b"File already exists" in r.body
+    assert [f["path"] for f in printer.files()] == ["/usb/foobar-long.gcode"]
+
+    # Overwriting through the short name replaces the file with one named as given
+    assert put(printer, "/api/v1/files/usb/foobar~1.gco", b"two", [("Overwrite", "?1")]).status == 201
+    assert [(f["path"], f["sfn_path"]) for f in printer.files()] == [("/usb/foobar~1.gco", "/usb/FOOBAR~1.GCO")]
+    assert printer.file_bytes("FOOBAR~1.GCO") == b"two"
+
+
+def test_a_short_folder_name_stands_for_its_folder(printer):
+    assert put(printer, "/api/v1/files/usb/My%20Prints/a.gcode").status == 201
+    r = put(printer, "/api/v1/files/usb/MYPRIN~1/b.gcode")
+    assert r.status == 201 and json.loads(r.body)["refs"]["download"] == "/usb/MYPRIN~1/B~1.GCO"
+    assert sorted(f["path"] for f in printer.files()) == ["/usb/My Prints/a.gcode", "/usb/My Prints/b.gcode"]
+    assert get(printer, "/api/v1/files/usb/My%20Prints/b.gcode").status == 200
+    assert get(printer, "/api/v1/files/usb/MYPRIN~1/A~1.GCO", "DELETE").status == 204
+    assert [f["path"] for f in printer.files()] == ["/usb/My Prints/b.gcode"]
+
+
 def test_short_name_tails_count_up(printer):
     names = [json.loads(put(printer, f"/api/v1/files/usb/benchy{n}.bgcode").body)["name"] for n in ("", "2", "3")]
     assert names == ["BENCHY~1.BGC", "BENCHY~2.BGC", "BENCHY~3.BGC"]

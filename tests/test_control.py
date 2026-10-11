@@ -170,6 +170,17 @@ def test_clock_and_reboot_make_nonces_stale(printer, how):
     assert _signed(printer, nonce) == (401, True)
 
 
+@pytest.mark.parametrize("seconds", [b"1e309", b"-1e309", b"NaN", b"Infinity"])
+def test_clock_advance_rejects_non_finite_seconds(printer, seconds):
+    with Conn("127.0.0.1", printer.port) as conn:
+        nonce = conn.request("GET", "/api/version").nonce
+    status, body = call(printer, "POST", "/_mock/clock/advance", b'{"seconds": ' + seconds + b"}")
+    assert status == 400 and "error" in body
+    assert _signed(printer, nonce) == 200  # the clock is untouched
+    with pytest.raises(ValueError):
+        printer.advance_clock(float(seconds))
+
+
 @pytest.mark.parametrize("method,path,status", [
     ("GET", "/nope", 404),
     ("GET", "/_mock/nope", 404),

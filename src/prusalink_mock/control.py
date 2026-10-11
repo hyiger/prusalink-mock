@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 from typing import TYPE_CHECKING, Any, Optional
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -145,7 +146,8 @@ def dispatch(core: "MockCore", method: str, target: str, body: bytes) -> tuple[i
         allow("POST")
         doc = _json_body(body)
         seconds = doc.get("seconds") if isinstance(doc, dict) else None
-        if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or seconds < 0:
+        if (isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or not math.isfinite(seconds)
+                or seconds < 0):
             raise _Reply(400, {"error": 'expected {"seconds": <non-negative number>}'})
         core.advance_clock(seconds)
         return 200, {"uptime": core.clock.uptime()}

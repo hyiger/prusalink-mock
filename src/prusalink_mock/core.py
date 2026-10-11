@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import math
 import os
 import socket
 import sys
@@ -256,6 +257,8 @@ class MockCore:
         self.nonces.reboot()
 
     def advance_clock(self, seconds: float) -> None:
+        if not math.isfinite(seconds) or seconds < 0:
+            raise ValueError(f"seconds must be a finite, non-negative number, not {seconds!r}")
         self.clock.advance(seconds)
 
     # --- printer port ------------------------------------------------------------

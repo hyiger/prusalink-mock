@@ -247,6 +247,8 @@ def test_upload_round_trip(writes):
         assert keys(info) == ["name", "ro", "type", "m_timestamp", "size", "refs", "display_name"]
         assert dict(info)["display_name"] == "contract test.gcode" and dict(info)["size"] == len(body)
         assert put(target).status == 409
+        # FatFS matches the reported short name as the same file (dir_find)
+        assert put(f"/api/v1/files/usb/plmock/{dict(info)['name']}").status == 409
         assert put("/api/v1/files/usb/plmock/x.txt").status == 415
         with conn(t) as c:
             r = c.request("PUT", "/api/v1/files/usb/plmock/x.gcode", key(t))

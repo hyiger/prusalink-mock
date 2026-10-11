@@ -242,11 +242,7 @@ def _lookup(core: "MockCore", filename: str) -> tuple[Optional[str], Optional[st
     if path is None or not core.state["storage"]["available"]:
         return None, path
     kind = core.storage.kind(path)
-    if kind is None:
-        f = core.storage.find_short(path)
-        if f is not None:
-            return "file", f.path
-    return kind, path
+    return kind, core.storage.resolve(path) if kind is not None else path
 
 
 def _file_extra(core: "MockCore", path: str) -> tuple[str, str]:
