@@ -29,7 +29,7 @@ def test_scenario_is_valid_and_named_after_its_file(name):
 
 def test_default_is_the_users_indx():
     st = state.load(state.DEFAULT_SCENARIO)
-    assert st["printer"]["printer_version"] == "7.10.0"
+    assert state.printer_version(st) == "7.10.0"
     assert {t["nozzle_diameter"] for t in st["tools"].values()} == {0.4}
     assert all(t["high_flow"] and not t["hardened"] for t in st["tools"].values())
     loaded = [t["loaded"] for t in st["tools"].values()]
@@ -138,3 +138,21 @@ def test_captured_tools_body_pastes_in():
     doc["tools"] = captured["tools"]
     st = normalize(doc)
     assert list(st["tools"]) == ["1", "5"]
+
+
+def test_job_id_lives_on_the_printer():
+    doc = state.load_document("indx-printing")
+    doc["job"]["id"] = 42
+    with pytest.raises(ScenarioError, match="/printer/job_id"):
+        normalize(doc)
+    st = state.load("indx-printing")
+    assert st["printer"]["job_id"] == 42 and "id" not in st["job"]
+    assert state.load("indx-hy8")["printer"]["job_id"] == 0
+
+
+def test_model_values_are_stored_only_when_set():
+    st = state.load("indx-hy8")
+    assert st["printer"]["printer_version"] is None and st["printer"]["tool_count"] is None
+    assert (state.printer_version(st), state.tool_count(st), state.hostname(st)) == ("7.10.0", 8, "prusa-core-one")
+    st = state.load("mini404-3tool")
+    assert st["printer"]["tool_count"] == 3 and state.printer_version(st) == "7.1.0"

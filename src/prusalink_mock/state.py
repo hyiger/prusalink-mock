@@ -121,6 +121,26 @@ def public(state: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+# --- values that follow the model ----------------------------------------------
+# printer_version, tool_count and hostname are stored as None unless a scenario
+# or a patch sets them, so they keep following the model when it changes.
+
+def printer_version(state: dict[str, Any]) -> str:
+    """PrinterModelInfo::current() version string (basic_gets.cpp:204, 219)."""
+    p = state["printer"]
+    return p["printer_version"] if p["printer_version"] is not None else MODELS[p["model"]]["version"]
+
+
+def tool_count(state: dict[str, Any]) -> int:
+    p = state["printer"]
+    return p["tool_count"] if p["tool_count"] is not None else MODELS[p["model"]]["tools"]
+
+
+def hostname(state: dict[str, Any]) -> str:
+    p = state["printer"]
+    return p["hostname"] if p["hostname"] is not None else MODELS[p["model"]]["hostname"]
+
+
 # --- validation -------------------------------------------------------------
 
 class _V:
@@ -178,6 +198,12 @@ class _V:
         if (lo is not None and v < lo) or (hi is not None and v > hi):
             self.err(f"{path}/{key}", f"must be in {lo}..{hi}")
         return float(v)
+
+    def optional_string(self, d: dict, key: str, path: str) -> Optional[str]:
+        """A string, or None when absent or null (the value then follows the model)."""
+        if d.get(key) is None:
+            return None
+        return self.string(d, key, path)
 
     def string(self, d: dict, key: str, path: str, default: Optional[str] = None,
                max_bytes: Optional[int] = None) -> Optional[str]:
@@ -257,14 +283,15 @@ def normalize(doc: Any) -> dict[str, Any]:
 
     p = v.obj(d.get("printer"), "/printer", (
         "model", "printer_version", "tool_count", "hostname", "serial", "nozzle_diameter", "mmu",
-        "min_extrusion_temp", "state", "active_tool", "bed", "nozzle", "axis", "flow", "speed", "fans",
+        "min_extrusion_temp", "state", "active_tool", "job_id", "bed", "nozzle", "axis", "flow", "speed", "fans",
     ))
     model = v.string(p, "model", "/printer", "COREONEINDX")
     info = MODELS.get(model)
     if info is None:
         v.err("/printer/model", f"unknown model (known: {', '.join(MODELS)})")
-        info = MODELS["COREONEINDX"]
-    tool_count = v.integer(p, "tool_count", "/printer", info["tools"], 1, 8)
+        model, info = "COREONEINDX", MODELS["COREONEINDX"]
+    tool_count_set = v.integer(p, "tool_count", "/printer", None, 1, 8)
+    tool_count = tool_count_set if tool_count_set is not None else info["tools"]
 
     tools_raw = d.get("tools", {})
     tools: dict[str, dict] = {}
@@ -273,12 +300,19 @@ def normalize(doc: Any) -> dict[str, Any]:
         tools_raw = {}
     for key, raw in tools_raw.items():
         if not re.fullmatch(r"[1-9][0-9]*", key) or int(key) > tool_count:
-            v.err(f"/tools/{key}", f"tool keys are \"1\"..\"{tool_count}\" on this printer")
+            v.err(f"/tools/{key}", f"tool keys are \"1\"..\"{tool_count}\" on this printer "
+                                   f"(/printer/tool_count, {info['tools']} on the {model})")
             continue
         tools[key] = _tool(v, raw, f"/tools/{key}")
     out["tools"] = {k: tools[k] for k in sorted(tools, key=int)}
 
-    default_nozzle = tools["1"]["nozzle_diameter"] if "1" in tools and tools["1"]["nozzle_diameter"] else 0.4
+    # /api/version and /api/v1/info report the nozzle of physical tool 0
+    # (basic_gets.cpp:203, 231), the same config store entry as tool 1 in
+    # /api/v1/tools (tools_renderer.cpp:22). While tool 1 is listed it wins; the
+    # stored value stays when dock 1 is uncalibrated, as in the config store.
+    nozzle_diameter = v.number(p, "nozzle_diameter", "/printer", 0.4, 0.1, 2.0)
+    if "1" in tools and tools["1"]["nozzle_diameter"] is not None:
+        nozzle_diameter = tools["1"]["nozzle_diameter"]
     state_name = v.string(p, "state", "/printer", "IDLE")
     if state_name not in PRINTER_STATES:
         v.err("/printer/state", f"must be one of {', '.join(PRINTER_STATES)}")
@@ -290,15 +324,18 @@ def normalize(doc: Any) -> dict[str, Any]:
         v.err("/printer/active_tool", "must be 0 (no tool picked) or a tool listed in /tools")
     out["printer"] = {
         "model": model,
-        "printer_version": v.string(p, "printer_version", "/printer", info["version"]),
-        "tool_count": tool_count,
-        "hostname": v.string(p, "hostname", "/printer", info["hostname"]),
+        "printer_version": v.optional_string(p, "printer_version", "/printer"),
+        "tool_count": tool_count_set,
+        "hostname": v.optional_string(p, "hostname", "/printer"),
         "serial": v.string(p, "serial", "/printer", "CZPX0000X000XC00000"),
-        "nozzle_diameter": v.number(p, "nozzle_diameter", "/printer", default_nozzle, 0.1, 2.0),
+        "nozzle_diameter": nozzle_diameter,
         "mmu": v.boolean(p, "mmu", "/printer", False),
         "min_extrusion_temp": v.integer(p, "min_extrusion_temp", "/printer", 170, 0, 1000),
         "state": state_name,
         "active_tool": active,
+        # marlin_vars job_id: the current job's id, kept after the job ends
+        # (marlin_server.cpp:1396, 2313-2315, 3730)
+        "job_id": v.integer(p, "job_id", "/printer", 0, 0, 65535),
         "bed": v.pair(p, "bed", "/printer", ("actual", "target")),
         "nozzle": v.pair(p, "nozzle", "/printer", ("actual", "target")),
         "axis": v.pair(p, "axis", "/printer", ("x", "y", "z")),
@@ -321,6 +358,8 @@ def normalize(doc: Any) -> dict[str, Any]:
     job_raw = d.get("job")
     if job_raw is not None:
         j = v.obj(job_raw, "/job", ("id", "progress", "time_printing", "time_remaining", "filament_change_in", "file"))
+        if "id" in j:
+            v.err("/job/id", "the job's id is /printer/job_id, which outlives the job")
         f = v.obj(j.get("file"), "/job/file", ("sfn_path", "display_name", "size", "m_timestamp"))
         if "file" not in j:
             v.err("/job/file", "required")
@@ -328,7 +367,6 @@ def normalize(doc: Any) -> dict[str, Any]:
         if not sfn_path.startswith("/usb/"):
             v.err("/job/file/sfn_path", "must start with /usb/")
         job = {
-            "id": v.integer(j, "id", "/job", 0, 0, 65535, required=True),
             "progress": v.integer(j, "progress", "/job", 0, 0, 100, required=True),
             "time_printing": v.integer(j, "time_printing", "/job", 0, 0, required=True),
             "time_remaining": v.integer(j, "time_remaining", "/job", None, 0),

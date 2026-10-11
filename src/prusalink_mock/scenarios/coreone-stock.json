@@ -5,7 +5,6 @@
   "firmware": {"version": "6.9.2+0", "has_filament_slots": false},
   "printer": {
     "model": "COREONE",
-    "hostname": "prusa-core-one",
     "serial": "CZPX0000X000XC00000",
     "min_extrusion_temp": 170,
     "state": "IDLE",

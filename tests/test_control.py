@@ -39,7 +39,7 @@ def test_health(printer):
 
 def test_state_hides_the_password(printer):
     status, body = call(printer, "GET", "/_mock/state")
-    assert status == 200 and "auth" not in body and body["printer"]["printer_version"] == "7.10.0"
+    assert status == 200 and "auth" not in body and body["printer"]["model"] == "COREONEINDX"
     assert printer.password not in json.dumps(body)
 
 
@@ -178,3 +178,53 @@ def test_clock_and_reboot_make_nonces_stale(printer, how):
 def test_control_errors(printer, method, path, status):
     body = b"not json" if method in ("PATCH", "POST") else None
     assert call(printer, method, path, body)[0] == status
+
+
+def test_job_commands_after_the_job_ends():
+    """The id is marlin_vars job_id, which outlives the job: 409 from the state checks, not 404."""
+    from prusalink_mock import MockPrinter
+    with MockPrinter("indx-printing") as printer:
+        def job(method, target):
+            with Conn("127.0.0.1", printer.port) as conn:
+                return conn.request(method, target, [("X-Api-Key", printer.password)]).status
+
+        assert job("DELETE", "/api/v1/job/41") == 404
+        assert job("PUT", "/api/v1/job/42/pause") == 204
+        assert job("PUT", "/api/v1/job/42/resume") == 204
+        assert job("DELETE", "/api/v1/job/42") == 204
+        assert [job("DELETE", "/api/v1/job/42"), job("PUT", "/api/v1/job/42/pause"),
+                job("PUT", "/api/v1/job/42/resume"), job("DELETE", "/api/v1/job/41")] == [409, 409, 409, 404]
+        assert job("GET", "/api/v1/job") == 204
+        assert printer.state()["printer"]["job_id"] == 42
+
+
+def _version_info(printer) -> tuple[dict, dict]:
+    with Conn("127.0.0.1", printer.port) as conn:
+        version = conn.request("GET", "/api/version", [("X-Api-Key", printer.password)])
+        info = conn.request("GET", "/api/v1/info", [("X-Api-Key", printer.password)])
+    return json.loads(version.body), json.loads(info.body)
+
+
+def test_nozzle_diameter_follows_tool_1(printer):
+    """basic_gets.cpp:203, 231 and tools_renderer.cpp:22 read the same config store entry."""
+    tool = {"loaded": True, "material": "PLA", "nozzle_diameter": 0.6, "hardened": False, "high_flow": True}
+    printer.set_tool(1, tool)
+    version, info = _version_info(printer)
+    assert version["nozzle_diameter"] == info["nozzle_diameter"] == tools_body(printer)["1"]["nozzle_diameter"] == 0.6
+    printer.remove_tool(1)  # an uncalibrated dock 1 keeps the stored diameter
+    assert _version_info(printer)[0]["nozzle_diameter"] == 0.6
+
+
+def test_model_values_follow_the_model(printer):
+    one_tool = {"1": {"loaded": False, "nozzle_diameter": 0.4, "hardened": False, "high_flow": False}}
+    printer.patch_state({"printer": {"model": "COREONEL", "active_tool": 1}, "tools": one_tool})
+    version, info = _version_info(printer)
+    assert version["printer"] == "8.1.0" and version["hostname"] == info["hostname"] == "prusa-core-one-l"
+    status, body = call(printer, "PATCH", "/_mock/state", {"tools": dict(one_tool, **{"2": one_tool["1"]})})
+    assert status == 422 and any("/printer/tool_count" in e for e in body["errors"])
+    printer.patch_state({"printer": {"printer_version": "9.9.9", "hostname": "lab-printer"}})
+    printer.patch_state({"printer": {"model": "COREONE"}})
+    version, _ = _version_info(printer)
+    assert version["printer"] == "9.9.9" and version["hostname"] == "lab-printer"
+    printer.patch_state({"printer": {"printer_version": None}})
+    assert _version_info(printer)[0]["printer"] == "7.1.0"

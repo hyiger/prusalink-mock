@@ -5,11 +5,11 @@
   "firmware": {"version": "6.9.2+0", "has_filament_slots": true},
   "printer": {
     "model": "COREONEINDX",
-    "hostname": "prusa-core-one",
     "serial": "CZPX0000X000XC00000",
     "min_extrusion_temp": 170,
     "state": "PRINTING",
     "active_tool": 1,
+    "job_id": 42,
     "bed": {"actual": 60.0, "target": 60.0},
     "nozzle": {"actual": 215.2, "target": 215.0},
     "axis": {"x": 120.0, "y": 110.0, "z": 2.4},
@@ -30,7 +30,6 @@
     "8": {"loaded": false, "material": "", "vendor": "", "color": "", "color_hex": "", "nozzle_diameter": 0.4, "hardened": false, "high_flow": true}
   },
   "job": {
-    "id": 42,
     "progress": 37,
     "time_remaining": 1830,
     "time_printing": 1120,

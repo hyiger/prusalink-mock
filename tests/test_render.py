@@ -90,12 +90,25 @@ def test_tools_skip_uncalibrated_docks_and_sort_numerically():
     assert '"3":' not in body
 
 
-def test_status_with_no_tool_picked_reports_zero_hotend():
+def test_status_with_no_tool_picked_on_the_indx_reports_the_head_fans():
+    """The NoTool hotend slot gets the head's fan RPMs on HAS_INDX builds (marlin_server.cpp:3653-3660)."""
     st = state.load("indx-hy8")
-    st["printer"]["nozzle"] = {"actual": 30.0, "target": 0.0}
-    st["printer"]["fans"] = {"hotend": 1200, "print": 0}
+    st["printer"]["nozzle"] = {"actual": 30.0, "target": 215.0}
+    st["printer"]["fans"] = {"hotend": 3120, "print": 1800}
     body = render.status(st).decode()
-    assert '"temp_nozzle":0.0' in body and '"flow":0' in body and '"fan_hotend":0' in body
+    assert ('"temp_nozzle":0.0,"target_nozzle":0.0,' in body and '"flow":0,' in body
+            and body.endswith('"fan_hotend":3120,"fan_print":1800}}'))
+
+
+def test_status_with_no_tool_picked_on_the_xl_is_all_zero():
+    doc = state.load_document("indx-hy8")
+    doc["printer"]["model"] = "XL"
+    doc["tools"] = {k: v for k, v in doc["tools"].items() if int(k) <= 5}
+    st = state.normalize(doc)
+    st["printer"]["nozzle"] = {"actual": 30.0, "target": 215.0}
+    st["printer"]["fans"] = {"hotend": 3120, "print": 1800}
+    body = render.status(st).decode()
+    assert '"temp_nozzle":0.0,"target_nozzle":0.0,' in body and body.endswith('"fan_hotend":0,"fan_print":0}}')
 
 
 def test_status_omits_xy_while_printing():

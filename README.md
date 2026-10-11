@@ -52,7 +52,23 @@ For manual runs of the fork, start PrusaSlicer with a throwaway `--datadir` and 
 | `login-disabled` | Empty password: every `/api` request is 401, whatever you send. |
 | `mini404-3tool` | The Mini404 emulator as captured: CORE One build with slots and a test patch for three tools. |
 
-A scenario is one flat JSON file: `firmware` (`version`, `has_filament_slots`), `printer` (model, hostname, serial, state, `active_tool` with 0 for no tool picked, bed, nozzle, axis, flow, speed, fans), `auth.password`, `storage.available`, `tools`, and `job` while printing. See `src/prusalink_mock/scenarios/indx-printing.json` for every field.
+A scenario is one flat JSON file. Outside `tools` and `job`, every field has a default:
+
+* `name`, `description`
+* `firmware`: `version` (`6.9.2+0`), `has_filament_slots` (false)
+* `printer`:
+  * `model`: `COREONEINDX` (default), `COREONELINDX`, `COREONE`, `COREONEL`, `MK4`, `MK4S`, `MINI` or `XL`
+  * `printer_version`, `tool_count` and `hostname`: from the model, and they follow it when it changes. Set one to override it, or to `null` in a patch to make it follow the model again. `GET /_mock/state` shows `null` while they do. A CORE One build with three tools, like `mini404-3tool`, needs `tool_count`.
+  * `nozzle_diameter`, what `/api/version` and `/api/v1/info` report: tool 1's while tool 1 is listed, as on the printer, otherwise the last value (0.4)
+  * `serial`, `mmu` (false), `min_extrusion_temp` (170)
+  * `state` (`IDLE`), `active_tool` (0 for no tool picked, the default on a toolchanger; always 1 on a single-tool printer)
+  * `job_id` (0): the current or last job's id, which the firmware keeps after the job ends
+  * `bed` and `nozzle` (`actual`, `target`), `axis` (`x`, `y`, `z`), all 0.0; `flow` and `speed` (100); `fans` (`hotend`, `print`, in RPM, 0)
+* `auth.password` (`mockKeyTest2345`), `storage.available` (true)
+* `tools`, below
+* `job`, required while `PRINTING` or `PAUSED`, allowed in `ATTENTION`: `progress` and `time_printing` (required), `time_remaining`, `filament_change_in`, and `file` with `sfn_path`, `display_name`, and `size` with `m_timestamp` (both or neither)
+
+`src/prusalink_mock/scenarios/indx-printing.json` shows most of them.
 
 `tools` is the `/api/v1/tools` body, so a captured body pastes straight in. A missing key is a dock that isn't calibrated (the firmware leaves it out). Scenarios are checked against the firmware's limits: tool keys 1 to 8 on an INDX, material up to 7 bytes, vendor and color up to 15, `color_hex` as uppercase `#RRGGBB` or empty, and an unloaded tool reports empty strings. `color_hex` can be left out for the 16 preset colors.
 
@@ -174,7 +190,8 @@ Modeled:
 * Request parsing (`lib/WUI/nhttp/req_parser.cpp`, `utils/gen-automata/http.py`): raw target kept as sent, 168-byte limit then 414 (`src/common/http/types.h:154`), prefix matching of `Connection`, `Accept`, `Overwrite` and `Print-After-Upload`, keep-alive rules (`req_parser.cpp:265-267`), Content-Length only (411 otherwise), no `100 Continue`.
 * Auth (`req_parser.cpp:115-174, 309-429`, `status_page.cpp:91-118`): X-Api-Key exact match, RFC 2069 Digest with HA2 over the raw target, nonce `random32 << 32 | uptime` valid for 300 s, the `stale=true` rule, last auth header wins, Basic gets the Digest challenge, empty password locks everything, auth before routing on `/api/`, `/usb/` and `/thumb/`. Both unit-test vectors from `tests/unit/lib/WUI/nhttp/server_tests.cpp` pass.
 * Responses (`lib/WUI/nhttp/headers.cpp:64-103`, `status_page.cpp:42-85`, `send_json.cpp`, `src/common/http/chunked.h`): header order, no Date or Server, chunked JSON with `%04X` sizes in 1024-byte packets on keep-alive, close-delimited otherwise, status pages as text or JSON cut at 127 bytes, and the lingering half-close on error paths (`handler.h:129-131`, `handler.cpp:15-24`) so clients see the status instead of a reset.
-* Bodies (`basic_gets.cpp`, `tools_renderer.cpp`, `status_renderer.cpp`, `file_info.cpp`, `src/common/json_encode.cpp`): `/api/version`, `/api/v1/info`, `/api/v1/storage`, `/api/v1/tools` (404 without filament slots), `/api/v1/status`, `/api/v1/job` (204 without a job, for any method), `/api/settings`.
+* Bodies (`basic_gets.cpp`, `tools_renderer.cpp`, `status_renderer.cpp`, `file_info.cpp`, `src/common/json_encode.cpp`): `/api/version`, `/api/v1/info`, `/api/v1/storage`, `/api/v1/tools` (404 without filament slots), `/api/v1/status`, `/api/v1/job` (204 without a job, for any method), `/api/settings`. With no tool picked, status reports zero nozzle temperatures and flow; the INDX still reports the head's fan RPMs, other toolchangers zero (`marlin_vars.hpp:402-404`, `marlin_server.cpp:3653-3660`). That rests on source reading; no capture covers it yet.
+* Job commands (`prusa_link_api_v1.cpp:42-155`): the id is compared with the printer's `job_id`, which outlives the job, so a command for a job that just ended gets 409, not 404.
 * Uploads (`gcode_upload.cpp:116-413`, `server.cpp:931-941`, `prusa_api_helpers.cpp:32-144`): percent-decoding with `+` as space, slash dedup, 411, 501 for 0 bytes, 415, 409 without `Overwrite: ?1`, 422, one transfer at a time, folders created as needed, FAT short names as FatFS makes them, 201 with the file info and Connection: close. Also Create-Folder, GET/HEAD file info, DELETE and POST (print). `POST /api/files/...` with a multipart body gets 410.
 
 Not modeled, or simplified:
@@ -182,7 +199,6 @@ Not modeled, or simplified:
 * Folder listings, ETags and 304; `/usb/` downloads; `/thumb/` previews; legacy `/api/printer`, `/api/job` and `/api/files`. These answer 501 "Not modeled by prusalink-mock" (after auth).
 * Transfers: `/api/v1/transfer` is always 204 and status has no `transfer` block.
 * Printing: Print-After-Upload and `POST /api/v1/files/...` are recorded but start nothing. Job pause, resume and stop change state at once, without the in-between states.
-* Status with no tool picked reports zero temperatures, flow and fans. That follows `marlin_vars.hpp:402-404` but isn't confirmed on hardware.
 * The 3-connection limit (`server.h:155-168`). Timeouts are approximate: 60 s idle, 10 s for a stalled upload body.
 * Short names for non-ASCII file names use `_` rather than the OEM code page.
 * Chunk boundaries follow the packet size, not the firmware's JSON segment boundaries.

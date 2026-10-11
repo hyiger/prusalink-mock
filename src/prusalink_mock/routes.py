@@ -15,7 +15,7 @@ import posixpath
 import re
 from typing import TYPE_CHECKING, Callable, Optional
 
-from . import render, wire
+from . import render, state as statemod, wire
 from .auth import AuthResult
 from .wire import CLOSE, ERROR_CLOSE, KEEP, Request, Response
 
@@ -163,17 +163,19 @@ async def _v1(core: "MockCore", req: Request, suffix: str, reader: asyncio.Strea
 def _job_command(core: "MockCore", req: Request, job_suffix: str) -> Response:
     """PUT /api/v1/job/{id}/pause|resume, DELETE /api/v1/job/{id} (prusa_link_api_v1.cpp:42-155).
 
-    State changes are immediate; the firmware passes through pausing and
-    stopping states first.
+    The id is compared with marlin_vars job_id, which keeps the last job's id
+    after the job ends (marlin_server.cpp:1396, 2313-2315, 3730), so a command
+    for a job that just ended gets 409 from the state checks, not 404. State
+    changes are immediate; the firmware passes through pausing and stopping
+    states first.
     """
     m = re.match(r"-?[0-9]+", job_suffix)
     if not m or not -(2 ** 31) <= int(m.group(0)) < 2 ** 31:
         return _page(req, 400)
     state = core.state
-    job = state.get("job")
-    if job is None or int(m.group(0)) != job["id"]:
-        return _page(req, 404)
     printer = state["printer"]
+    if int(m.group(0)) != printer["job_id"]:
+        return _page(req, 404)
     if req.method == "PUT":
         slash = job_suffix.find("/")
         if slash < 0:
@@ -492,7 +494,7 @@ def _index_page(core: "MockCore") -> bytes:
 </head><body>
 <h1>PrusaLink mock: {html.escape(state['name'])}</h1>
 <p>{html.escape(state['description'])}</p>
-<p>{html.escape(p['model'])} (printer {html.escape(p['printer_version'])}), firmware {html.escape(state['firmware']['version'])}, state {html.escape(p['state'])}</p>
+<p>{html.escape(p['model'])} (printer {html.escape(statemod.printer_version(state))}), firmware {html.escape(state['firmware']['version'])}, state {html.escape(p['state'])}</p>
 {slots}<table><tr><th>Tool</th><th>Loaded</th><th>Material</th><th>Vendor</th><th>Color</th><th>Nozzle</th><th>Hardened</th><th>High flow</th></tr>
 {''.join(rows)}
 </table></body></html>

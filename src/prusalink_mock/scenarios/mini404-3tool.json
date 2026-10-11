@@ -6,7 +6,6 @@
   "printer": {
     "model": "COREONE",
     "tool_count": 3,
-    "hostname": "prusa-core-one",
     "serial": "4558-34000019005259999",
     "min_extrusion_temp": 170,
     "state": "IDLE",

@@ -13,6 +13,8 @@ import posixpath
 import struct
 from typing import Any, Mapping
 
+from . import state as statemod
+
 # src/common/json_encode.cpp:21-29 plus the \0 special case at :64-66.
 # Everything else, including other control characters and non-ASCII, passes
 # through unescaped.
@@ -102,10 +104,6 @@ def _obj(*fields: str) -> str:
     return "{" + ",".join(fields) + "}"
 
 
-def nozzle_diameter_tool1(state: Mapping[str, Any]) -> float:
-    return state["printer"]["nozzle_diameter"]
-
-
 def version(state: Mapping[str, Any]) -> bytes:
     """GET /api/version (basic_gets.cpp:200-226)."""
     p = state["printer"]
@@ -114,9 +112,9 @@ def version(state: Mapping[str, Any]) -> bytes:
         _s("server", SERVER_VERSION),
         _f("nozzle_diameter", p["nozzle_diameter"], 2),
         _s("text", "PrusaLink"),
-        _s("hostname", p["hostname"]),
+        _s("hostname", statemod.hostname(state)),
         _s("firmware", state["firmware"]["version"]),
-        _s("printer", p["printer_version"]),
+        _s("printer", statemod.printer_version(state)),
         '"capabilities":' + _obj(_b("upload-by-put", True)),
     )
     return body.encode()
@@ -129,7 +127,7 @@ def info(state: Mapping[str, Any]) -> bytes:
         _f("nozzle_diameter", p["nozzle_diameter"], 2),
         _b("mmu", p["mmu"]),
         _s("serial", p["serial"]),
-        _s("hostname", p["hostname"]),
+        _s("hostname", statemod.hostname(state)),
         _i("min_extrusion_temp", p["min_extrusion_temp"]),
     )
     return body.encode()
@@ -180,14 +178,23 @@ def is_printing(state: Mapping[str, Any]) -> bool:
     )
 
 
-def _active_hotend(state: Mapping[str, Any]) -> tuple[float, float, int, int, int]:
-    """Active hotend values; all zero when no tool is picked on a toolchanger.
+# HAS_INDX builds (ProjectOptions.cmake:827)
+INDX_MODELS = ("COREONEINDX", "COREONELINDX")
 
-    The zero values for "no tool picked" follow marlin_vars.hpp:402-404 and are
-    not yet confirmed on hardware.
+
+def _active_hotend(state: Mapping[str, Any]) -> tuple[float, float, int, int, int]:
+    """Nozzle temperature, target, flow and the two fan RPMs of the active hotend.
+
+    With no tool picked, active_hotend() is the extra NoTool slot
+    (marlin_vars.hpp:402-404) and flow is 0 (status_renderer.cpp:74). Nothing
+    writes that slot's temperatures. On the INDX the server loop copies the
+    head's fan RPMs into it (marlin_server.cpp:3653-3660), so the fans still
+    report; on other toolchangers the slot stays all zero.
     """
     p = state["printer"]
     if p["active_tool"] == 0:
+        if p["model"] in INDX_MODELS:
+            return 0.0, 0.0, 0, p["fans"]["hotend"], p["fans"]["print"]
         return 0.0, 0.0, 0, 0, 0
     return p["nozzle"]["actual"], p["nozzle"]["target"], p["flow"], p["fans"]["hotend"], p["fans"]["print"]
 
@@ -198,7 +205,7 @@ def status(state: Mapping[str, Any]) -> bytes:
     parts = []
     if has_job(state):
         job = state["job"]
-        fields = [_i("id", job["id"]), _f("progress", job["progress"], 2)]
+        fields = [_i("id", p["job_id"]), _f("progress", job["progress"], 2)]
         if job.get("time_remaining") is not None:
             fields.append(_i("time_remaining", job["time_remaining"]))
         if job.get("filament_change_in") is not None:
@@ -247,7 +254,7 @@ def job(state: Mapping[str, Any]) -> bytes:
     sfn_path = f["sfn_path"]
     escaped = jsonify_str(sfn_path)
     fields = [
-        _i("id", j["id"]),
+        _i("id", state["printer"]["job_id"]),
         _s("state", _job_state(state)),
         _f("progress", j["progress"], 2),
     ]
