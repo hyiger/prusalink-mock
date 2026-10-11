@@ -350,3 +350,20 @@ def test_advertised_url_answers(host):
         assert printer.url == f"http://{'[::1]' if host == '::' else '127.0.0.1'}:{printer.port}"
         with Conn(printer.host, printer.port) as conn:
             assert conn.request("GET", "/api/version", [("X-Api-Key", printer.password)]).status == 200
+
+
+def test_password_is_redacted_from_every_logged_field(tmp_path):
+    from prusalink_mock import MockPrinter
+    log = tmp_path / "log.jsonl"
+    with MockPrinter(log_file=str(log)) as printer:
+        key = printer.password
+        lower = "".join(f"%{b:02x}" for b in key.encode())
+        for target in (f"/api/version?token={key}", f"/api/v1/files/usb/{lower}.gcode", f"/{key}"):
+            with Conn("127.0.0.1", printer.port) as conn:
+                conn.request("GET", target, [("X-Api-Key", key)])
+        with Conn("127.0.0.1", printer.port) as conn:
+            conn.request("PUT", f"/api/v1/files/usb/{key}.gcode",
+                         [("X-Api-Key", key), ("Content-Length", "5")], b"G28\n\n")
+        entries = json.dumps(printer.requests())
+        assert key not in entries and lower not in entries.lower() and entries.count("<redacted>") >= 4
+    assert key not in log.read_text(encoding="utf-8")

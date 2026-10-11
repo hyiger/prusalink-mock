@@ -82,12 +82,12 @@ def test_numbers_at_the_limits_are_kept():
     with MockPrinter("indx-printing") as printer:
         printer.patch_state({"printer": {"bed": {"actual": 3.4e38, "target": 32767}, "nozzle": {"target": 215}},
                              "job": {"time_printing": 4294967295, "time_remaining": 4294967294,
-                                     "file": {"size": 2147483647, "m_timestamp": 4354819199}}})
+                                     "file": {"size": 2147483647, "m_timestamp": 4354819169}}})
         status = json.loads(printer_get(printer, "/api/v1/status").body)
         assert status["printer"]["target_bed"] == 32767.0 and status["printer"]["target_nozzle"] == 215.0
         assert status["job"]["time_printing"] == 4294967295 and status["job"]["time_remaining"] == 4294967294
         job = json.loads(printer_get(printer, "/api/v1/job").body)
-        assert job["file"]["size"] == 2147483647 and job["file"]["m_timestamp"] == 4354819199
+        assert job["file"]["size"] == 2147483647 and job["file"]["m_timestamp"] == 4354819169
 
 
 def test_targets_are_whole_numbers_given_either_way(printer):
@@ -358,7 +358,8 @@ def test_clock_advances_add_up_to_2107_at_most():
                 r = conn.request("PUT", "/api/v1/files/usb/late.gcode",
                                  [("X-Api-Key", printer.password), ("Content-Length", "3"), ("Overwrite", "?1")],
                                  b"G1\n")
-            assert r.status == 201 and json.loads(r.body)["m_timestamp"] == 4354819199
+            # 23:59:59 reads back as 23:59:29: FAT's halved seconds come back undoubled
+                assert r.status == 201 and json.loads(r.body)["m_timestamp"] == 4354819169
 
 
 @pytest.mark.parametrize("epoch", [0, 1e300, float("nan"), 4354819200])

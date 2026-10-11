@@ -129,6 +129,14 @@ def test_create_folder_in_a_folder_named_by_its_short_name(printer):
     assert sorted(f["path"] for f in printer.files()) == ["/usb/My Prints/a.gcode", "/usb/My Prints/sub/b.gcode"]
 
 
+def test_upload_time_has_the_firmwares_halved_seconds():
+    """get_fattime stores seconds halved and get_posix_time reads them back undoubled."""
+    with MockPrinter(epoch=1767225637, frozen_clock=True) as printer:  # 2026-01-01 00:00:37 UTC
+        info = json.loads(put(printer, "/api/v1/files/usb/a.gcode").body)
+        assert info["m_timestamp"] == 1767225618
+        assert json.loads(get(printer, "/api/v1/files/usb/a.gcode").body)["m_timestamp"] == 1767225618
+
+
 def test_short_name_tails_count_up(printer):
     names = [json.loads(put(printer, f"/api/v1/files/usb/benchy{n}.bgcode").body)["name"] for n in ("", "2", "3")]
     assert names == ["BENCHY~1.BGC", "BENCHY~2.BGC", "BENCHY~3.BGC"]

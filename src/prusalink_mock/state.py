@@ -616,6 +616,10 @@ def normalize(doc: Any) -> dict[str, Any]:
         }
         if (job["file"]["size"] is None) != (job["file"]["m_timestamp"] is None):
             v.err("/job/file", "give both size and m_timestamp, or neither")
+        if job["file"]["m_timestamp"] is not None and job["file"]["m_timestamp"] % 60 >= 30:
+            # get_posix_time reads FAT's halved seconds back without doubling them
+            # (filesystem_fatfs.cpp:152-164), so the firmware never reports :30 to :59
+            v.err("/job/file/m_timestamp", "the firmware never reports seconds of 30 or more")
         out["job"] = job
     if state_name in JOB_STATES and "job" not in out:
         v.err("/job", f"required while the printer is {state_name}")

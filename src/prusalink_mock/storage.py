@@ -11,12 +11,25 @@ reports (``/usb/AB~1.GCO``) can be reproduced.
 from __future__ import annotations
 
 import hashlib
+import time
 from dataclasses import dataclass
 from typing import Optional
 
 from .sfn import NoShortName, short_name
 
 ROOT = "/usb"
+
+
+def fat_mtime(t: int) -> int:
+    """The modification time the firmware reports for a file written at ``t``.
+
+    get_fattime stores the seconds halved, as FAT does (src/buddy/fatfs.cpp:19-25),
+    and get_posix_time reads them back without doubling them
+    (src/buddy/filesystem_fatfs.cpp:152-164), so a file written at 12:00:37
+    reports 12:00:18. The seconds of a reported time are always below 30.
+    """
+    seconds = time.gmtime(t).tm_sec
+    return t - seconds + seconds // 2
 
 
 def _upper(ch: str) -> str:

@@ -76,7 +76,7 @@ Everything else is checked against the type the firmware keeps it in, so the pri
 
 * Strings are valid Unicode without control characters. `hostname` is up to 20 bytes, `serial` 24, `job.file.display_name` 166 and `job.file.sfn_path` 102. `printer_version` is three numbers from 0 to 255, like `7.10.0`.
 * Decimal numbers fit a 32-bit float. `bed.target` and `nozzle.target` are whole numbers from -32768 to 32767 (`60` or `60.0`).
-* `job_id`, `flow`, `speed` and the fans are 0 to 65535, and `time_printing` 0 to 4294967295. `time_remaining` and `filament_change_in` stop at 4294967294: the firmware leaves the field out at 4294967295, so leave it out instead. `size` is 0 to 2147483647 (a 32-bit `off_t`), and `m_timestamp` a FAT date from 1980 to 2107 (315532800 to 4354819199).
+* `job_id`, `flow`, `speed` and the fans are 0 to 65535, and `time_printing` 0 to 4294967295. `time_remaining` and `filament_change_in` stop at 4294967294: the firmware leaves the field out at 4294967295, so leave it out instead. `size` is 0 to 2147483647 (a 32-bit `off_t`), and `m_timestamp` a FAT date from 1980 to 2107 (315532800 to 4354819199) whose seconds are below 30: the firmware stores seconds halved and reads them back without doubling them, so uploads report 12:00:37 as 12:00:18 too.
 * A scenario or patch is a JSON object nested 32 levels deep at most.
 
 ## Control API
@@ -113,7 +113,7 @@ curl -X POST $C/_mock/clock/advance -d '{"seconds":301}'
 
 A state write keeps the current password, `--password` included, unless it sets `auth.password`.
 
-Log entries carry the method, the raw target, the normalized path, headers with the API key, the Digest response and other credentials redacted (and the password scrubbed from any other header), the auth outcome, status, whether the connection closed, the fault that fired, upload details (`stored_as`, `sfn_path`, `overwrite`, `print_after_upload`), `print_requested` for a print start, and `error` for timeouts, early closes and bugs in the mock. An entry is in the log before its response goes out. `--log-file` also appends them to a JSON lines file.
+Log entries carry the method, the raw target, the normalized path, headers with the API key, the Digest response and other credentials redacted, the password scrubbed from every other field (target, path, file names, errors), raw or percent-encoded, the auth outcome, status, whether the connection closed, the fault that fired, upload details (`stored_as`, `sfn_path`, `overwrite`, `print_after_upload`), `print_requested` for a print start, and `error` for timeouts, early closes and bugs in the mock. An entry is in the log before its response goes out. `--log-file` also appends them to a JSON lines file.
 
 ## Fault rules
 
@@ -188,7 +188,7 @@ Tests marked `contract` check firmware behavior that has to hold on the mock and
 .venv/bin/python -m pytest -m contract --target http://127.0.0.1:8080 --password-file=$HOME/.prusalink-password
 ```
 
-They send only GET and HEAD requests, plus requests that fail authentication. `--allow-writes` adds an upload and delete of `/usb/plmock/contract test.gcode`; on a real printer, an upload opens the print preview on the screen. The password is read from the file and never printed; failures show `<secret>` in its place. Keep the `=` in `--password-file=FILE`, or pytest takes the file's folder for the project root.
+They send only GET and HEAD requests, plus requests that fail authentication. `--allow-writes` adds an upload and delete of `/usb/plmock/contract test.gcode`; on a real printer, an upload opens the print preview on the screen, and the preview's question screens count as printing, so `Currently-Printing` in the upload's reply can read true there. The mock doesn't model the preview. The password is read from the file and never printed; failures show `<secret>` in its place. Keep the `=` in `--password-file=FILE`, or pytest takes the file's folder for the project root.
 
 On Mini404, `--allow-writes` needs the emulated USB drive to be a FAT image (`-drive id=usbstick,format=raw,file=usb.img`). QEMU's `fat:rw:` folder drive crashes the emulator as soon as the firmware creates a folder. The full suite, writes included, passes against Mini404 running `v6.9.2-hy.3` with a FAT32 image.
 

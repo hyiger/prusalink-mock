@@ -241,14 +241,21 @@ def test_upload_round_trip(writes):
 
     try:
         r = put(target, extra=[("Overwrite", "?1")])
-        assert r.status == 201 and r.closed and r.header_lines()[1:] == [
-            "Content-Type: application/json", "Connection: close", "Read-Only: false", "Currently-Printing: false"]
+        # The upload opens a print preview of the file, and is_printing() counts the preview's
+        # question screens (marlin_server.cpp:1451-1465), so on a printer Currently-Printing
+        # can already read true for the file just uploaded. The mock doesn't model the preview.
+        lines = r.header_lines()[1:]
+        assert r.status == 201 and r.closed and lines[:3] == [
+            "Content-Type: application/json", "Connection: close", "Read-Only: false"]
+        assert lines[3:] in (["Currently-Printing: false"], ["Currently-Printing: true"])
         info = ordered(r.body)
         assert keys(info) == ["name", "ro", "type", "m_timestamp", "size", "refs", "display_name"]
         assert dict(info)["display_name"] == "contract test.gcode" and dict(info)["size"] == len(body)
         assert put(target).status == 409
         # FatFS matches the reported short name as the same file (dir_find)
         assert put(f"/api/v1/files/usb/plmock/{dict(info)['name']}").status == 409
+        # FAT's halved seconds come back undoubled (filesystem_fatfs.cpp:152-164)
+        assert dict(info)["m_timestamp"] % 60 < 30
         assert put("/api/v1/files/usb/plmock/x.txt").status == 415
         with conn(t) as c:
             r = c.request("PUT", "/api/v1/files/usb/plmock/x.gcode", key(t))

@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Callable, Optional
 
 from . import render, state as statemod, wire
 from .auth import AuthResult
+from .storage import fat_mtime
 from .wire import CLOSE, ERROR_CLOSE, KEEP, Request, Response
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -423,7 +424,7 @@ def _finish_upload(core: "MockCore", req: Request, filename: str, data: bytes, e
             return fail(409, "File is busy")
     elif kind == "dir":
         return fail(409, "Is a directory or ongoing transfer" if req.overwrite else "File already exists")
-    stored = core.storage.store(path, data, core.clock.now(), print_after_upload=req.print_after_upload,
+    stored = core.storage.store(path, data, fat_mtime(core.clock.now()), print_after_upload=req.print_after_upload,
                                 overwrite=req.overwrite)
     if stored is None:
         return fail(422, _NO_SHORT_NAME)

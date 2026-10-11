@@ -121,6 +121,13 @@ def test_job_only_while_printing():
         normalize(doc)
 
 
+def test_job_file_time_has_the_firmwares_seconds():
+    doc = state.load_document("indx-printing")
+    doc["job"]["file"]["m_timestamp"] = 1767225645  # :45, which get_posix_time can't report
+    with pytest.raises(ScenarioError, match="/job/file/m_timestamp"):
+        normalize(doc)
+
+
 def test_merge_patch():
     base = {"printer": {"bed": {"actual": 1.0, "target": 2.0}, "state": "IDLE"}, "tools": {"1": {}, "2": {}},
             "job": {"id": 1}}

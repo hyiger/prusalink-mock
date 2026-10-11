@@ -16,8 +16,10 @@ at :309-429) and the header automaton in utils/gen-automata/http.py.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import random
+import re
 import secrets
 import time
 from dataclasses import dataclass, field
@@ -302,6 +304,36 @@ def scrub(text: str, password: str) -> str:
     """
     key = password.encode("utf-8").decode("latin-1")
     return text.replace(key, "<redacted>") if key else text
+
+
+@functools.lru_cache(maxsize=8)
+def _password_pattern(password: str) -> "re.Pattern[str]":
+    """Each character of the password as itself, as its UTF-8 bytes read as latin-1
+    (how header values and raw targets are decoded), percent-encoded in either case,
+    or a space as '+'."""
+    parts = []
+    for ch in password:
+        raw = ch.encode("utf-8")
+        alternatives = {re.escape(ch), re.escape(raw.decode("latin-1")),
+                        "".join(f"%[{b >> 4:X}{b >> 4:x}][{b & 15:X}{b & 15:x}]" for b in raw)}
+        if ch == " ":
+            alternatives.add(r"\+")
+        parts.append("(?:" + "|".join(sorted(alternatives)) + ")")
+    return re.compile("".join(parts))
+
+
+def scrub_value(value, password: str):
+    """``value`` with the password redacted from every string in it, for the request
+    log: a client can send it in the target, a file name or a header, encoded or not."""
+    if not password:
+        return value
+    if isinstance(value, str):
+        return _password_pattern(password).sub("<redacted>", value)
+    if isinstance(value, dict):
+        return {k: scrub_value(v, password) for k, v in value.items()}
+    if isinstance(value, list):
+        return [scrub_value(v, password) for v in value]
+    return value
 
 
 def redact_header(name: str, value: str, auth: Optional[AuthResult], password: str = "") -> str:
