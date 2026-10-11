@@ -54,5 +54,5 @@ include = [
 testpaths = ["tests"]
 pythonpath = ["src", "tests"]
 markers = [
-    "contract: firmware behavior checks that also run against a live target (--target URL --password-file F)",
+    "contract: firmware behavior checks that also run against a live target (--target URL --password-file=FILE)",
 ]

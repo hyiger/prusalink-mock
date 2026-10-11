@@ -143,7 +143,8 @@ class Conn:
     def request(self, method: str, target: str, headers: Iterable[tuple[str, str]] = (), body: bytes = b"",
                 version: str = "HTTP/1.1", no_body: Optional[bool] = None) -> RawResponse:
         lines = [f"{method} {target} {version}", "Host: 127.0.0.1"]
-        lines += [f"{n}: {v}" for n, v in headers]
+        # A value can be a conftest.Secret, revealed only here.
+        lines += [f"{n}: {v.reveal() if hasattr(v, 'reveal') else v}" for n, v in headers]
         self.send(("\r\n".join(lines) + "\r\n\r\n").encode("latin-1") + body)
         return self.read_response(no_body=False if no_body is None else no_body)
 

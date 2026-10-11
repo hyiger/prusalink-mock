@@ -168,3 +168,7 @@ def test_redaction_never_shows_secrets():
     redacted = auth.redact_header("Authorization", value, None)
     assert "0123456789abcdef" not in redacted and 'response="<redacted>"' in redacted
     assert auth.redact_header("Authorization", "Basic bWFrZXI6cHc=", None) == "Basic <redacted>"
+
+
+def test_digest_client_repr_hides_the_password():
+    assert "s3cret" not in repr(auth.DigestClient("s3cret"))

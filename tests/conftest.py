@@ -25,7 +25,11 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 
 class Secret:
-    """Keeps the password out of assertion messages and tracebacks."""
+    """Keeps the password out of assertion messages and tracebacks.
+
+    httpraw.Conn takes it as a header value and reveals it only when writing
+    the request.
+    """
 
     def __init__(self, value: str):
         self._value = value

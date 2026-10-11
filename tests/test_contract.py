@@ -3,10 +3,16 @@
 Without options these run against an in-process mock. To check the mock's
 assumptions against Mini404 or a printer:
 
-    pytest -m contract --target http://127.0.0.1:8080 --password-file ~/secrets/prusalink
+    pytest -m contract --target http://127.0.0.1:8080 --password-file=$HOME/.prusalink-password
+
+Keep the "=": with a space, pytest takes the file's folder for the project root
+and never loads the options.
 
 Only GET/HEAD requests and requests that fail authentication are sent, unless
 --allow-writes is given (then a small file is uploaded and deleted again).
+
+Credentials stay wrapped in Secret (conftest.py) all the way to the socket, so
+assertion messages and tracebacks show <secret> instead of the key.
 """
 
 from __future__ import annotations
@@ -16,6 +22,7 @@ import re
 
 import pytest
 
+from conftest import Secret
 from httpraw import Conn, nonce_masked
 from prusalink_mock.auth import DigestClient
 
@@ -29,7 +36,11 @@ def conn(t) -> Conn:
 
 
 def key(t):
-    return [("X-Api-Key", t.password.reveal())]
+    return [("X-Api-Key", t.password)]
+
+
+def digest(t, method, target, nonce, uri=None):
+    return [("Authorization", Secret(DigestClient(t.password.reveal()).header(method, target, nonce, uri)))]
 
 
 def get(t, target, headers=None, **kw):
@@ -123,13 +134,14 @@ def test_unauthorized(contract_target):
         assert r.header("Content-Length") == "43" and r.body == b'{"title": "401: Unauthorized","message":""}'
 
 
-@pytest.mark.parametrize("value", ["wrong-key", "", "<case>", "<prefix>", "<extra>"])
-def test_api_key_rejected(contract_target, value):
-    pw = contract_target.password.reveal()
-    value = {"<case>": pw.swapcase(), "<prefix>": pw[:-1], "<extra>": pw + "x"}.get(value, value)
-    if value == pw:
+@pytest.mark.parametrize("variant", ["wrong-key", "", "<case>", "<prefix>", "<extra>"])
+def test_api_key_rejected(contract_target, variant):
+    pw = contract_target.password
+    sent = Secret({"<case>": pw.reveal().swapcase(), "<prefix>": pw.reveal()[:-1],
+                   "<extra>": pw.reveal() + "x"}.get(variant, variant))
+    if sent.reveal() == pw.reveal():
         pytest.skip("the password has no letters to change the case of")
-    r = get(contract_target, "/api/version", [("X-Api-Key", value)])
+    r = get(contract_target, "/api/version", [("X-Api-Key", sent)])
     assert r.status == 401 and r.header("WWW-Authenticate") == 'ApiKey realm="Printer API"'
 
 
@@ -171,12 +183,10 @@ def _challenge_nonce(t, target="/api/version") -> str:
 
 def test_digest_uses_the_raw_target(contract_target):
     t = contract_target
-    client = DigestClient(t.password.reveal())
     nonce = _challenge_nonce(t)
-    assert get(t, "/api/version", [("Authorization", client.header("GET", "/api/version", nonce,
-                                                                     uri="/ignored"))]).status == 200
-    r = get(t, "/api/version", [("Authorization", client.header("GET", "/api//version", nonce,
-                                                                 uri="/api/version"))])
+    r = get(t, "/api/version", digest(t, "GET", "/api/version", nonce, uri="/ignored"))
+    assert r.status == 200
+    r = get(t, "/api/version", digest(t, "GET", "/api//version", nonce, uri="/api/version"))
     assert r.status == 401 and r.header("WWW-Authenticate").endswith("stale=false")
 
 
@@ -184,8 +194,7 @@ def test_previous_boot_nonce_is_stale(contract_target):
     t = contract_target
     nonce = _challenge_nonce(t)
     old = f"{int(nonce[:8], 16) ^ 0x5A5A5A5A:08x}" + nonce[8:]
-    r = get(t, "/api/version", [("Authorization", DigestClient(t.password.reveal()).header("GET", "/api/version",
-                                                                                           old))])
+    r = get(t, "/api/version", digest(t, "GET", "/api/version", old))
     assert r.status == 401 and r.header("WWW-Authenticate").endswith("stale=true")
 
 
@@ -195,7 +204,8 @@ def test_last_auth_header_wins(contract_target):
                                    f'uri="/api/version", response="{"0" * 32}"')
     r = get(t, "/api/version", key(t) + [bad_digest])
     assert r.status == 401 and r.header("WWW-Authenticate").startswith("Digest")
-    assert get(t, "/api/version", [bad_digest] + key(t)).status == 200
+    r = get(t, "/api/version", [bad_digest] + key(t))
+    assert r.status == 200
 
 
 def test_http10(contract_target):
@@ -239,7 +249,8 @@ def test_upload_round_trip(writes):
         assert put(target).status == 409
         assert put("/api/v1/files/usb/plmock/x.txt").status == 415
         with conn(t) as c:
-            assert c.request("PUT", "/api/v1/files/usb/plmock/x.gcode", key(t)).status == 411
+            r = c.request("PUT", "/api/v1/files/usb/plmock/x.gcode", key(t))
+        assert r.status == 411
         assert get(t, "/api/v1/files/usb/plmock/contract%20test.gcode").status == 200
     finally:
         with conn(t) as c:

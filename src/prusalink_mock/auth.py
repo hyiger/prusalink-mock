@@ -20,7 +20,7 @@ import hashlib
 import random
 import secrets
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Optional, Sequence
 
 REALM = "Printer API"
@@ -283,7 +283,7 @@ def redact_header(name: str, value: str, auth: Optional[AuthResult]) -> str:
 class DigestClient:
     """Minimal client-side helper used by tests and the contract suite."""
 
-    password: str
+    password: str = field(repr=False)
     username: str = USERNAME
 
     def header(self, method: str, target: str, nonce: str, uri: Optional[str] = None) -> str:

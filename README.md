@@ -163,7 +163,7 @@ Tests marked `contract` check firmware behavior that has to hold on the mock and
 .venv/bin/python -m pytest -m contract --target http://127.0.0.1:8080 --password-file=$HOME/.prusalink-password
 ```
 
-They send only GET and HEAD requests, plus requests that fail authentication. `--allow-writes` adds an upload and delete of `/usb/plmock/contract test.gcode`; on a real printer, an upload opens the print preview on the screen. The password is read from the file and never printed. Keep the `=` in `--password-file=FILE`, or pytest takes the file's folder for the project root.
+They send only GET and HEAD requests, plus requests that fail authentication. `--allow-writes` adds an upload and delete of `/usb/plmock/contract test.gcode`; on a real printer, an upload opens the print preview on the screen. The password is read from the file and never printed; failures show `<secret>` in its place. Keep the `=` in `--password-file=FILE`, or pytest takes the file's folder for the project root.
 
 ## Fidelity
 
