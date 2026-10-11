@@ -1,0 +1,23 @@
+{
+  "schema": "prusalink-mock/scenario@1",
+  "name": "indx-no-docks",
+  "description": "CORE One INDX with no dock calibrated: /api/v1/tools answers {\"tools\":{}}.",
+  "firmware": {"version": "6.9.2+0", "has_filament_slots": true},
+  "printer": {
+    "model": "COREONEINDX",
+    "hostname": "prusa-core-one",
+    "serial": "CZPX0000X000XC00000",
+    "min_extrusion_temp": 170,
+    "state": "IDLE",
+    "active_tool": 0,
+    "bed": {"actual": 23.4, "target": 0.0},
+    "nozzle": {"actual": 0.0, "target": 0.0},
+    "axis": {"x": 241.0, "y": 170.0, "z": 5.0},
+    "flow": 100,
+    "speed": 100,
+    "fans": {"hotend": 0, "print": 0}
+  },
+  "auth": {"password": "mockKeyTest2345"},
+  "storage": {"available": true},
+  "tools": {}
+}

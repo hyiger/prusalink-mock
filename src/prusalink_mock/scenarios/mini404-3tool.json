@@ -1,0 +1,28 @@
+{
+  "schema": "prusalink-mock/scenario@1",
+  "name": "mini404-3tool",
+  "description": "The Mini404 emulator kit: a CORE One build with filament slots and a test-only patch for three tools, as captured from firmware 312ad0dc7.",
+  "firmware": {"version": "6.9.2+16345.LOCAL", "has_filament_slots": true},
+  "printer": {
+    "model": "COREONE",
+    "tool_count": 3,
+    "hostname": "prusa-core-one",
+    "serial": "4558-34000019005259999",
+    "min_extrusion_temp": 170,
+    "state": "IDLE",
+    "active_tool": 1,
+    "bed": {"actual": 18.6, "target": 0.0},
+    "nozzle": {"actual": 19.0, "target": 0.0},
+    "axis": {"x": 252.0, "y": -19.0, "z": 0.0},
+    "flow": 100,
+    "speed": 100,
+    "fans": {"hotend": 3, "print": 0}
+  },
+  "auth": {"password": "mockKeyTest2345"},
+  "storage": {"available": true},
+  "tools": {
+    "1": {"loaded": true, "material": "PETG", "vendor": "", "color": "", "color_hex": "", "nozzle_diameter": 0.4, "hardened": false, "high_flow": true},
+    "2": {"loaded": true, "material": "PETG", "vendor": "Prusament", "color": "Black", "color_hex": "#000000", "nozzle_diameter": 0.4, "hardened": false, "high_flow": true},
+    "3": {"loaded": true, "material": "ASA", "vendor": "Sunlu", "color": "Cyan", "color_hex": "#00FFFF", "nozzle_diameter": 0.4, "hardened": false, "high_flow": true}
+  }
+}

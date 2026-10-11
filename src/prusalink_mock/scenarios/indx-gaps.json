@@ -1,0 +1,28 @@
+{
+  "schema": "prusalink-mock/scenario@1",
+  "name": "indx-gaps",
+  "description": "Docks 1, 2, 3 and 5 calibrated, so the tool keys have a gap. Tool 3 is empty; tool 5 has PA with no vendor or color on a 0.60 hardened high-flow nozzle. Byte-identical to the firmware fixture.",
+  "firmware": {"version": "6.9.2+0", "has_filament_slots": true},
+  "printer": {
+    "model": "COREONEINDX",
+    "hostname": "prusa-core-one",
+    "serial": "CZPX0000X000XC00000",
+    "min_extrusion_temp": 170,
+    "state": "IDLE",
+    "active_tool": 0,
+    "bed": {"actual": 23.4, "target": 0.0},
+    "nozzle": {"actual": 0.0, "target": 0.0},
+    "axis": {"x": 241.0, "y": 170.0, "z": 5.0},
+    "flow": 100,
+    "speed": 100,
+    "fans": {"hotend": 0, "print": 0}
+  },
+  "auth": {"password": "mockKeyTest2345"},
+  "storage": {"available": true},
+  "tools": {
+    "1": {"loaded": true, "material": "PLA", "vendor": "Prusament", "color": "Orange", "color_hex": "#FFA500", "nozzle_diameter": 0.4, "hardened": false, "high_flow": false},
+    "2": {"loaded": true, "material": "PETG", "vendor": "Polymaker", "color": "Black", "color_hex": "#000000", "nozzle_diameter": 0.4, "hardened": false, "high_flow": false},
+    "3": {"loaded": false, "material": "", "vendor": "", "color": "", "color_hex": "", "nozzle_diameter": 0.4, "hardened": false, "high_flow": false},
+    "5": {"loaded": true, "material": "PA", "vendor": "", "color": "", "color_hex": "", "nozzle_diameter": 0.6, "hardened": true, "high_flow": true}
+  }
+}
