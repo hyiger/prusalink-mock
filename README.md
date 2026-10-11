@@ -181,6 +181,8 @@ Tests marked `contract` check firmware behavior that has to hold on the mock and
 
 They send only GET and HEAD requests, plus requests that fail authentication. `--allow-writes` adds an upload and delete of `/usb/plmock/contract test.gcode`; on a real printer, an upload opens the print preview on the screen. The password is read from the file and never printed; failures show `<secret>` in its place. Keep the `=` in `--password-file=FILE`, or pytest takes the file's folder for the project root.
 
+On Mini404, `--allow-writes` needs the emulated USB drive to be a FAT image (`-drive id=usbstick,format=raw,file=usb.img`). QEMU's `fat:rw:` folder drive crashes the emulator as soon as the firmware creates a folder. The full suite, writes included, passes against Mini404 running `312ad0dc7` with a FAT32 image.
+
 ## Fidelity
 
 Firmware paths below are in hyiger/Prusa-Firmware-Buddy at `312ad0dc7`.
