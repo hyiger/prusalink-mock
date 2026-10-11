@@ -308,14 +308,14 @@ def scrub(text: str, password: str) -> str:
 
 @functools.lru_cache(maxsize=8)
 def _password_pattern(password: str) -> "re.Pattern[str]":
-    """Each character of the password as itself, as its UTF-8 bytes read as latin-1
-    (how header values and raw targets are decoded), percent-encoded in either case,
-    or a space as '+'."""
+    """Each character of the password as itself, or as its UTF-8 bytes, each one read as
+    latin-1 (how header values and raw targets are decoded) or percent-encoded in either
+    case on its own, or a space as '+'."""
     parts = []
     for ch in password:
         raw = ch.encode("utf-8")
-        alternatives = {re.escape(ch), re.escape(raw.decode("latin-1")),
-                        "".join(f"%[{b >> 4:X}{b >> 4:x}][{b & 15:X}{b & 15:x}]" for b in raw)}
+        alternatives = {re.escape(ch), "".join(
+            f"(?:{re.escape(chr(b))}|%[{b >> 4:X}{b >> 4:x}][{b & 15:X}{b & 15:x}])" for b in raw)}
         if ch == " ":
             alternatives.add(r"\+")
         parts.append("(?:" + "|".join(sorted(alternatives)) + ")")

@@ -89,8 +89,11 @@ class MockCore:
                 raise ValueError(f"{name} must be 0..65535, not {value!r}")
         self.password_override = password
         self.scenario_ref = scenario
+        # Every password the mock has had, in order: a request can begin, authenticate and
+        # be logged under different ones, so log entries are scrubbed of all of them
+        self.passwords: dict[str, None] = {}
         self.base_state = self._with_password(statemod.load(scenario))
-        self.state: dict[str, Any] = copy.deepcopy(self.base_state)
+        self.state = copy.deepcopy(self.base_state)
         self.clock = authmod.Clock(frozen=frozen_clock, epoch=epoch)
         self.nonces = authmod.NonceSource(self.clock, seed)
         self.storage = Storage()
@@ -177,6 +180,16 @@ class MockCore:
     @property
     def control_url(self) -> str:
         return _url(self.control_connect_host, self.control_port)
+
+    @property
+    def state(self) -> dict[str, Any]:
+        return self._state
+
+    @state.setter
+    def state(self, value: dict[str, Any]) -> None:
+        self._state = value
+        if value["auth"]["password"]:
+            self.passwords[value["auth"]["password"]] = None
 
     @property
     def password(self) -> str:
@@ -315,29 +328,20 @@ class MockCore:
         close gets 400 (req_parser.cpp:242-246).
         """
         parser = wire.HeadParser()
-        password: Optional[str] = None  # when the request's first byte arrived
-
-        def request() -> Request:
-            req = parser.request()
-            req.arrival_password = self.password if password is None else password
-            return req
-
         while True:
             if inp.buf:
                 del inp.buf[:parser.feed(bytes(inp.buf))]
-                if password is None and parser.consumed > 0:
-                    password = self.password
                 if parser.done:
-                    return request()
+                    return parser.request()
             started = parser.consumed > 0
             try:
                 more = await inp.fill(wire.ACTIVE_TIMEOUT_S if started else wire.IDLE_TIMEOUT_S)
             except asyncio.TimeoutError:
                 if started:
-                    req = request()
+                    req = parser.request()
                     entry = self._entry(req, conn_id)
                     entry.update(route="invalid", status=408, close=True, error="request head timed out")
-                    self._log(entry, req, None, time.monotonic(), req.arrival_password)
+                    self._log(entry, req, None, time.monotonic())
                     writer.write(wire.GOODBYE)
                     await writer.drain()
                 return None
@@ -345,7 +349,7 @@ class MockCore:
                 if not started:
                     return None
                 parser.eof()
-                return request()
+                return parser.request()
 
     def _entry(self, req: Request, conn_id: int) -> dict:
         return {
@@ -365,15 +369,15 @@ class MockCore:
             "fault": None,
         }
 
-    def _log(self, entry: dict, req: Request, auth: Optional[authmod.AuthResult], started: float,
-             request_password: str) -> None:
-        """Log a request, with the password scrubbed: the one it arrived under, which a control
-        call can change while it waits for a body or a delay, and the current one."""
-        entry["headers"] = [[n, authmod.redact_header(n, v, auth, request_password)] for n, v in req.headers]
+    def _log(self, entry: dict, req: Request, auth: Optional[authmod.AuthResult], started: float) -> None:
+        """Log a request with every password the mock has had scrubbed from it: control calls
+        can change the password while a request waits for its head, body or a delay."""
+        entry["headers"] = [[n, authmod.redact_header(n, v, auth, self.password)] for n, v in req.headers]
         # The password can also come in the target, a file name, any header or other text the
         # client sent, encoded or not
+        passwords = tuple(self.passwords)
         for key, value in entry.items():
-            entry[key] = authmod.scrub_value(value, request_password, self.password)
+            entry[key] = authmod.scrub_value(value, *passwords)
         entry["duration_ms"] = round((time.monotonic() - started) * 1000, 1)
         self.log.add(entry)
 
@@ -385,7 +389,6 @@ class MockCore:
         """
         started = time.monotonic()
         generation = self.generation
-        request_password = req.arrival_password
         entry = self._entry(req, conn_id)
         auth: Optional[authmod.AuthResult] = None
         logged = False
@@ -393,7 +396,7 @@ class MockCore:
         def commit() -> None:
             nonlocal logged
             if not logged and generation == self.generation:  # nothing from before a reset
-                self._log(entry, req, auth, started, request_password)
+                self._log(entry, req, auth, started)
             logged = True
 
         try:

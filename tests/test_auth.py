@@ -191,3 +191,9 @@ def test_overlapping_passwords_are_redacted_whole():
     assert scrub_value("abcz", "abc", "bcz") == "<redacted>"
     assert scrub_value("aaa", "aa") == "<redacted>"
     assert scrub_value({"t": ["a%41b", 1]}, "aAb", "") == {"t": ["<redacted>", 1]}
+
+
+def test_utf8_bytes_may_each_be_raw_or_encoded():
+    from prusalink_mock.auth import scrub_value
+    for text in ("\u00e9x", "\u00c3\u00a9x", "\u00c3%A9x", "%C3\u00a9x", "%c3%a9x"):
+        assert scrub_value(text, "\u00e9x") == "<redacted>", text

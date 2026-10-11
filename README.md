@@ -113,7 +113,7 @@ curl -X POST $C/_mock/clock/advance -d '{"seconds":301}'
 
 A state write keeps the current password, `--password` included, unless it sets `auth.password`.
 
-Log entries carry the method, the raw target, the normalized path, headers with the API key, the Digest response and other credentials redacted, the password scrubbed from every other field (target, path, file names, errors), raw or percent-encoded, the auth outcome, status, whether the connection closed, the fault that fired, upload details (`stored_as`, `sfn_path`, `overwrite`, `print_after_upload`), `print_requested` for a print start, and `error` for timeouts, early closes and bugs in the mock. An entry is in the log before its response goes out. `--log-file` also appends them to a JSON lines file.
+Log entries carry the method, the raw target, the normalized path, headers with the API key, the Digest response and other credentials redacted, and every password the mock has had scrubbed from every other field (target, path, file names, errors), raw or percent-encoded, the auth outcome, status, whether the connection closed, the fault that fired, upload details (`stored_as`, `sfn_path`, `overwrite`, `print_after_upload`), `print_requested` for a print start, and `error` for timeouts, early closes and bugs in the mock. An entry is in the log before its response goes out. `--log-file` also appends them to a JSON lines file.
 
 ## Fault rules
 

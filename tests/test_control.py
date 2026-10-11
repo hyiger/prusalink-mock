@@ -382,3 +382,18 @@ def test_password_changed_mid_request_is_still_redacted(printer):
         conn.read_response()
     entries = json.dumps(printer.requests())
     assert old not in entries and "<redacted>" in entries
+
+
+def test_every_password_a_request_met_is_redacted(printer):
+    a, b = printer.password, "secondKey12"
+    with Conn("127.0.0.1", printer.port) as conn:
+        conn.sock.sendall(f"PUT /api/v1/files/usb/{a}.gcode HTTP/1.1\r\n".encode())  # begins under A
+        time.sleep(0.05)
+        printer.patch_state({"auth": {"password": b}})
+        conn.sock.sendall(f"X-Api-Key: {b}\r\nX-Note: {b}\r\nContent-Length: 8\r\n\r\nG28\n".encode())  # B
+        time.sleep(0.3)  # authenticated under B, waiting for the body
+        printer.patch_state({"auth": {"password": "thirdKey123"}})
+        conn.sock.sendall(b"G28\n")
+        conn.read_response()
+    entries = json.dumps(printer.requests())
+    assert a not in entries and b not in entries and "<redacted>" in entries
