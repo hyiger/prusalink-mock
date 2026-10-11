@@ -215,3 +215,112 @@ def test_idle_connection_is_kept_open(printer):
         assert conn.request("GET", "/api/version", key(printer)).status == 200
         time.sleep(0.3)
         assert conn.request("GET", "/api/version", key(printer)).status == 200
+
+
+# --- the firmware's request automaton (utils/gen-automata/http.py) ------------
+
+def test_stray_crlf_before_the_request_line_is_an_unknown_method(printer):
+    with Conn("127.0.0.1", printer.port) as conn:
+        conn.send(f"\r\nGET /api/version HTTP/1.1\r\nX-Api-Key: {printer.password}\r\n\r\n".encode())
+        r = conn.read_response()
+        assert r.status == 405 and r.body == b"405: Method Not Allowed\n\nUnrecognized method\n"
+        assert r.header("Connection") == "keep-alive"
+        assert conn.request("GET", "/api/version", key(printer)).status == 200
+
+
+def test_a_keyword_prefix_eats_the_space(printer):
+    """"GE" leaves the trie at the space, so the method runs on to the next space."""
+    with Conn("127.0.0.1", printer.port) as conn:
+        conn.send(b"GE /api/version /api/version HTTP/1.1\r\n\r\n")
+        r = conn.read_response()
+    assert r.status == 405 and b"Unrecognized method" in r.body
+    [entry] = printer.requests()
+    assert entry["method"] == "GE /api/version" and entry["target"] == "/api/version"
+
+
+def test_bare_cr_ends_a_line(printer):
+    with Conn("127.0.0.1", printer.port) as conn:
+        conn.send(f"GET /api/version HTTP/1.1\rX-Api-Key: {printer.password}\r\n\r\n".encode())
+        assert conn.read_response().status == 200
+
+
+def test_unknown_header_name_runs_to_the_next_colon(printer):
+    """"X-Api" is a prefix of a known name, so its colon is eaten and the key line goes with it."""
+    with Conn("127.0.0.1", printer.port) as conn:
+        r = conn.request("GET", "/api/version", [("X-Api", "1"), ("X-Api-Key", printer.password)])
+    assert r.status == 401
+
+
+def test_empty_api_key_value_takes_the_line_end(printer):
+    with Conn("127.0.0.1", printer.port) as conn:
+        conn.send(f"GET /api/version HTTP/1.1\r\nX-Api-Key:\n{printer.password}\r\n\r\n".encode())
+        r = conn.read_response()
+    assert r.status == 401 and r.header("WWW-Authenticate") == 'ApiKey realm="Printer API"'
+
+
+@pytest.fixture
+def short_timeouts(monkeypatch):
+    from prusalink_mock import wire
+    monkeypatch.setattr(wire, "ACTIVE_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(wire, "IDLE_TIMEOUT_S", 1.5)
+
+
+@pytest.mark.parametrize("sent", [
+    b"GET /api/v1/tools HTTP/1.1\r\nHost: x\r\n",
+    b"GET /api/v1/tools",
+    b"GARBAGE\r\n\r\n",
+    b"GET /api/v1/tools\r\n\r\n",
+], ids=["head", "request-line", "no-space", "no-version"])
+def test_stalled_request_gets_the_bare_408(printer, short_timeouts, sent):
+    """server.cpp:481-521: the goodbye literal with its NUL, no headers, then close."""
+    with Conn("127.0.0.1", printer.port) as conn:
+        conn.send(sent)
+        start = time.monotonic()
+        assert conn.read_to_eof() == b"HTTP/1.1 408 Request Timeout\r\n\r\n\x00"
+        assert time.monotonic() - start < 1.2  # the active timeout, not the idle one
+    assert printer.requests()[-1]["status"] == 408
+
+
+def test_idle_connection_closes_without_a_word(printer, short_timeouts):
+    with Conn("127.0.0.1", printer.port) as conn:
+        assert conn.request("GET", "/api/version", key(printer)).status == 200
+        assert conn.read_to_eof() == b""
+
+
+@pytest.mark.parametrize("sent", [
+    b"GET /api/v1/tools HTTP/1.1\r\nHost: x\r\n",
+    b"GET /api/v1/to",
+])
+def test_client_close_mid_head_gets_400(printer, sent):
+    with Conn("127.0.0.1", printer.port) as conn:
+        conn.send(sent)
+        conn.sock.shutdown(socket.SHUT_WR)
+        r = conn.read_response()
+    assert r.status == 400 and r.closed and r.body == b"400: Bad Request\n\n\n"
+
+
+def test_client_close_without_a_request_is_silent(printer):
+    with Conn("127.0.0.1", printer.port) as conn:
+        assert conn.request("GET", "/api/version", key(printer)).status == 200
+        conn.sock.shutdown(socket.SHUT_WR)
+        assert conn.read_to_eof() == b""
+
+
+def test_if_none_match_counts_ascii_digits_only(printer):
+    """req_parser.cpp:192-200 checks '0'..'9'; a superscript two is not a digit."""
+    with Conn("127.0.0.1", printer.port) as conn:
+        conn.send(f'GET /api/version HTTP/1.1\r\nX-Api-Key: {printer.password}\r\n'
+                  f'If-None-Match: "1\xb2"\r\n\r\n'.encode("latin-1"))
+        assert conn.read_response().status == 200
+
+
+def test_a_mock_bug_answers_500(printer, monkeypatch):
+    from prusalink_mock import routes
+
+    def boom(*args):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(routes, "_get_only", boom)
+    with Conn("127.0.0.1", printer.port) as conn:
+        r = conn.request("GET", "/api/version", key(printer))
+    assert r.status == 500 and r.closed and b"prusalink-mock bug" in r.body

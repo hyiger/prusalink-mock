@@ -20,14 +20,14 @@ from .auth import AuthResult
 from .wire import CLOSE, ERROR_CLOSE, KEEP, Request, Response
 
 if TYPE_CHECKING:  # pragma: no cover
-    from .core import MockCore
+    from .core import Input, MockCore
 
 NOT_MODELED = "Not modeled by prusalink-mock"
 PATH_MAX = 103  # filename_defs::max_path_length (include/buddy/filename_defs.hpp)
-ACTIVE_TIMEOUT_S = 10.0  # Server::ACTIVE_TIMEOUT (server.h:168)
 READY_STATES = ("IDLE", "STOPPED", "FINISHED")  # printer_state::remote_print_ready
 PRINTABLE = (".g", ".gc", ".gco", ".gcode", ".bgcode", ".bgc")  # src/common/filename_type.cpp
-_FAT_INVALID = set('"*:<>?|\x7f\\')
+# Characters FatFS refuses in a long name (create_name, lib/Middlewares/Third_Party/FatFs/src/ff.c:2827).
+_LFN_INVALID = frozenset('"*:<>?|\x7f')
 
 
 def is_protected(target: str) -> bool:
@@ -103,8 +103,8 @@ def being_printed(core: "MockCore", path: str) -> bool:
             and job["file"]["sfn_path"].upper() == f.sfn_path.upper())
 
 
-async def route(core: "MockCore", req: Request, auth: Optional[AuthResult],
-                reader: asyncio.StreamReader, entry: dict) -> Optional[Response]:
+async def route(core: "MockCore", req: Request, auth: Optional[AuthResult], inp: "Input",
+                entry: dict) -> Response:
     target = req.target
     if is_protected(target):
         assert auth is not None
@@ -112,12 +112,14 @@ async def route(core: "MockCore", req: Request, auth: Optional[AuthResult],
             entry["route"] = "auth"
             return _page(req, 401, extra=(auth.challenge,))
         if target.startswith("/api/v1/"):
-            return await _v1(core, req, target[len("/api/v1/"):], reader, entry)
+            return await _v1(core, req, target[len("/api/v1/"):], inp, entry)
         if target.startswith("/api/"):
             return _octo(core, req, target[len("/api/"):], entry)
         entry["route"] = "usb" if target.startswith("/usb/") else "thumb"
         return _not_modeled(req)
 
+    # The firmware serves its gzipped web UI here (static_file.cpp:21-63). The
+    # mock serves its own status page instead, listed under Fidelity in README.md.
     decoded = uri_filename(target)
     if req.method == "GET" and decoded is not None and (len(decoded) <= 1 or decoded == "/index.html"):
         entry["route"] = "static.index"
@@ -128,8 +130,7 @@ async def route(core: "MockCore", req: Request, auth: Optional[AuthResult],
 
 # --- /api/v1/ ----------------------------------------------------------------
 
-async def _v1(core: "MockCore", req: Request, suffix: str, reader: asyncio.StreamReader,
-              entry: dict) -> Optional[Response]:
+async def _v1(core: "MockCore", req: Request, suffix: str, inp: "Input", entry: dict) -> Response:
     state = core.state
     if suffix == "storage":
         entry["route"] = "v1.storage"
@@ -155,7 +156,7 @@ async def _v1(core: "MockCore", req: Request, suffix: str, reader: asyncio.Strea
         entry["route"] = "v1.transfer"
         return _page(req, 204)
     if suffix.startswith("files"):
-        return await _files(core, req, reader, entry)
+        return await _files(core, req, inp, entry)
     entry["route"] = "v1.unknown"
     return _page(req, 404)
 
@@ -203,8 +204,7 @@ def _job_command(core: "MockCore", req: Request, job_suffix: str) -> Response:
 
 # --- /api/v1/files -----------------------------------------------------------
 
-async def _files(core: "MockCore", req: Request, reader: asyncio.StreamReader,
-                 entry: dict) -> Optional[Response]:
+async def _files(core: "MockCore", req: Request, inp: "Input", entry: dict) -> Response:
     """prusa_link_api_v1.cpp:182-233 with parse_file_url (prusa_api_helpers.cpp:32-99)."""
     entry["route"] = "v1.files"
     decoded = uri_filename(req.target)
@@ -223,7 +223,7 @@ async def _files(core: "MockCore", req: Request, reader: asyncio.StreamReader,
         entry["route"] = "v1.files.put"
         if len(filename.encode("latin-1")) > PATH_MAX:
             return _page(req, 414)
-        return await _upload(core, req, filename, reader, entry)
+        return await _upload(core, req, filename, inp, entry)
     if req.method in ("GET", "HEAD"):
         entry["route"] = "v1.files.info"
         return _file_info(core, req, filename)
@@ -273,13 +273,16 @@ def _file_info(core: "MockCore", req: Request, filename: str) -> Response:
 
 
 def _delete(core: "MockCore", req: Request, filename: str) -> Response:
-    """delete_file (prusa_api_helpers.cpp:101-113)."""
+    """delete_file (prusa_api_helpers.cpp:101-113) and remove_file (print_utils.cpp:84-117).
+
+    A PUT in progress doesn't block deleting its destination: the body goes to
+    a temporary file that is renamed into place at the end (gcode_upload.cpp:
+    142-145). "File is being transferred" only comes from Connect's partial
+    transfers (transfer_file_check.cpp:10-29), which the mock doesn't model.
+    """
     kind, path = _lookup(core, filename)
-    if kind == "file":
-        if being_printed(core, path):
-            return _page(req, 409, "File is busy")
-        if core.upload_path is not None and core.upload_path.upper() == path.upper():
-            return _page(req, 409, "File is being transferred")
+    if kind == "file" and being_printed(core, path):
+        return _page(req, 409, "File is busy")
     if kind is None or not core.storage.remove(path):
         return _page(req, 404)
     return _page(req, 204)
@@ -309,36 +312,54 @@ def _create_folder(core: "MockCore", req: Request, filename: str) -> Response:
     return _page(req, 201)
 
 
-def _invalid_name(path: str) -> bool:
-    return any(ord(ch) < 0x20 or ch in _FAT_INVALID for ch in path)
+def _bad_component(component: str) -> bool:
+    """FatFS refuses the name: not UTF-8, or a character a long name can't hold (ff.c:2822-2828).
+
+    stat() and mkdir() fail on it, and rename() reports ENOTDIR, the errno of
+    FR_INVALID_NAME (src/buddy/filesystem_fatfs.cpp:70-113).
+    """
+    text = _as_text(component)
+    return text is None or any(ch in _LFN_INVALID for ch in text)
 
 
-def _check_filename(core: "MockCore", req: Request, path: Optional[str], filename: str) -> Optional[tuple[int, str]]:
+def _name_not_modeled(filename: str) -> bool:
+    """FatFS ends a name at a control character and splits folders at a backslash
+    (ff.c:51, 2826), so the file would land under another name; not modeled."""
+    return any(ord(ch) < 0x20 or ch == "\\" for ch in filename)
+
+
+def _split(filename: str) -> tuple[list[str], str]:
+    """Folder components and file name of a decoded /usb/... path."""
+    *folders, base = filename[len("/usb/"):].split("/")
+    return folders, base
+
+
+def _check_filename(core: "MockCore", req: Request, filename: str) -> Optional[tuple[int, str]]:
     """GcodeUpload::check_filename (gcode_upload.cpp:334-377), run on the first body bytes."""
-    name = filename[len("/usb/"):]
-    if not name.lower().endswith(PRINTABLE):
+    folders, base = _split(filename)
+    if not filename[len("/usb/"):].lower().endswith(PRINTABLE):
         return 415, "Not a GCODE"
-    if path is None:
-        return None  # rejected when the file is renamed into place
-    pos = name.rfind("/")
-    if pos >= 0:
-        kind = core.storage.kind("/usb/" + path[len("/usb/"):].rsplit("/", 1)[0])
+    if folders:  # file_dir_exists (gcode_upload.cpp:167-189)
+        if any(_bad_component(c) for c in folders):
+            return None  # stat fails, so the folder counts as missing: checked at the end
+        kind = core.storage.kind(_as_text("/usb/" + "/".join(folders)))
         if kind == "file":
             return 409, "Conflicting upload path"
         if kind is None:
-            return None  # parent folder doesn't exist yet: checked at the end
+            return None  # the folder doesn't exist yet: checked at the end
     if req.overwrite:
-        if being_printed(core, path):
+        if not _bad_component(base) and being_printed(core, _as_text(filename)):
             return 409, "File is busy"
         return None
-    if core.storage.kind(path) is not None:
+    # A check file renamed to the name and back (try_rename, gcode_upload.cpp:192-239)
+    if _bad_component(base):
+        return 404, "Destination directory does not exist"
+    if core.storage.kind(_as_text(filename)) is not None:
         return 409, "File already exists"
-    if _invalid_name(path):
-        return 422, "Filename contains invalid characters"
     return None
 
 
-def _finish_upload(core: "MockCore", req: Request, path: Optional[str], data: bytes, entry: dict) -> Response:
+def _finish_upload(core: "MockCore", req: Request, filename: str, data: bytes, entry: dict) -> Response:
     """PutTransfer::done (gcode_upload.cpp:257-315) and the reply (server.cpp:931-941).
 
     Errors after the body has been read are plain text with Connection: close.
@@ -346,10 +367,17 @@ def _finish_upload(core: "MockCore", req: Request, path: Optional[str], data: by
     def fail(status: int, message: str) -> Response:
         return wire.status_page(status, CLOSE, False, message)
 
-    if path is None or _invalid_name(path):
-        return fail(422, "Filename contains invalid characters")
-    if not core.storage.make_dirs(path):
+    folders, base = _split(filename)
+    # make_dirs (src/common/path_utils.cpp:35-51): mkdir fails on a name FatFS refuses
+    if any(_bad_component(c) for c in folders):
         return fail(500, "Failed to create a folder")
+    folder = _as_text("/".join(["/usb"] + folders))
+    if not core.storage.make_dirs(f"{folder}/{base}"):  # takes the file's path
+        return fail(500, "Failed to create a folder")
+    # try_rename (gcode_upload.cpp:192-239): stat finds nothing, rename gets ENOTDIR
+    if _bad_component(base):
+        return fail(404, "Destination directory does not exist")
+    path = _as_text(filename)
     kind = core.storage.kind(path)
     if kind == "file":
         if not req.overwrite:
@@ -373,13 +401,15 @@ def _finish_upload(core: "MockCore", req: Request, path: Optional[str], data: by
     return Response(201, head, body, after=CLOSE, is_json=True, content_type="application/json")
 
 
-async def _read_some(reader: asyncio.StreamReader, n: int) -> bytes:
-    return await asyncio.wait_for(reader.read(n), ACTIVE_TIMEOUT_S)
+async def _upload(core: "MockCore", req: Request, filename: str, inp: "Input", entry: dict) -> Response:
+    """PUT upload: GcodeUpload::start (gcode_upload.cpp:116-151) and step (:379-413), then
+    the transfer slot (server.cpp:709-800) and PutTransfer::done.
 
-
-async def _upload(core: "MockCore", req: Request, filename: str, reader: asyncio.StreamReader,
-                  entry: dict) -> Optional[Response]:
-    """PUT upload (GcodeUpload::start, gcode_upload.cpp:116-151, then step and done)."""
+    A stall of ACTIVE_TIMEOUT gets the bare 408 goodbye; the transfer's own
+    "Connection timeout" result is dropped (server.cpp:481-521, 709-730). A
+    client close before the body is "Truncated body"; after part of it, the
+    transfer slot answers "Connection closed by client".
+    """
     json_errors = req.accepts_json
     entry["upload"] = {"overwrite": req.overwrite, "print_after_upload": req.print_after_upload}
     if req.content_length is None:
@@ -392,21 +422,23 @@ async def _upload(core: "MockCore", req: Request, filename: str, reader: asyncio
         return wire.status_page(507, ERROR_CLOSE, json_errors, "Failed to write to location")
     if req.content_length > core.max_upload_bytes:
         return wire.status_page(507, ERROR_CLOSE, json_errors, "USB drive full")
+    if _name_not_modeled(filename):
+        return _not_modeled(req)
 
-    path = _as_text(filename)
-    core.upload_path = path or filename
-    digest = hashlib.sha256()
+    owner = object()
+    core.upload_path, core.upload_owner = _as_text(filename) or filename, owner
     data = bytearray()
     try:
         remaining = req.content_length
         try:
-            first = await _read_some(reader, min(remaining, 65536))
+            first = await inp.read(min(remaining, 65536), wire.ACTIVE_TIMEOUT_S)
         except asyncio.TimeoutError:
-            return wire.status_page(408, CLOSE, False, "Connection timeout")
+            entry["error"] = "body timed out"
+            return wire.goodbye()
         if not first:
             entry["error"] = "client closed before the body"
-            return None
-        error = _check_filename(core, req, path, filename)
+            return wire.status_page(400, ERROR_CLOSE, json_errors, "Truncated body")
+        error = _check_filename(core, req, filename)
         if error is not None:
             entry["body_len"] = len(first)
             return wire.status_page(error[0], ERROR_CLOSE, json_errors, error[1])
@@ -414,22 +446,23 @@ async def _upload(core: "MockCore", req: Request, filename: str, reader: asyncio
         remaining -= len(first)
         while remaining > 0:
             try:
-                chunk = await _read_some(reader, min(remaining, 65536))
+                chunk = await inp.read(min(remaining, 65536), wire.ACTIVE_TIMEOUT_S)
             except asyncio.TimeoutError:
                 entry["body_len"] = len(data)
-                return wire.status_page(408, CLOSE, False, "Connection timeout")
+                entry["error"] = "body timed out"
+                return wire.goodbye()
             if not chunk:
                 entry["body_len"] = len(data)
                 entry["error"] = "client closed mid-body"
-                return None
+                return wire.status_page(400, CLOSE, False, "Connection closed by client")
             data += chunk
             remaining -= len(chunk)
-        digest.update(data)
         entry["body_len"] = len(data)
-        entry["body_sha256"] = digest.hexdigest()
-        return _finish_upload(core, req, path, bytes(data), entry)
+        entry["body_sha256"] = hashlib.sha256(data).hexdigest()
+        return _finish_upload(core, req, filename, bytes(data), entry)
     finally:
-        core.upload_path = None
+        if core.upload_owner is owner:
+            core.upload_path = core.upload_owner = None
 
 
 # --- /api/ (OctoPrint compatible) ------------------------------------------------

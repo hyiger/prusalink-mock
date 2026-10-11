@@ -1,7 +1,7 @@
 """HTTP/1.1 request parsing and response framing, matching the firmware.
 
-Request side: lib/WUI/nhttp/req_parser.cpp and the generated automaton
-(utils/gen-automata/http.py, http_server.py). Response side:
+Request side: lib/WUI/nhttp/req_parser.cpp and the automaton generated from
+utils/gen-automata/http.py, parts.py and http_server.py. Response side:
 lib/WUI/nhttp/headers.cpp (write_headers), status_page.cpp, send_json.cpp and
 src/common/http/chunked.h.
 """
@@ -15,6 +15,8 @@ from typing import Optional
 from . import render
 
 MAX_URL_LEN = 168  # src/common/http/types.h:154
+IDLE_TIMEOUT_S = 60.0  # Server::IDLE_TIMEOUT (server.h:161)
+ACTIVE_TIMEOUT_S = 10.0  # Server::ACTIVE_TIMEOUT (server.h:168)
 BUFF_SIZE = 1024  # Server::BUFF_SIZE = TCP_MSS (server.h:156, lwipopts.h:44)
 KNOWN_METHODS = ("GET", "POST", "PUT", "DELETE", "HEAD")
 
@@ -23,7 +25,49 @@ KEEP = "keep"  # Connection: keep-alive
 CLOSE = "close"  # Connection: close, close after writing
 ERROR_CLOSE = "error_close"  # Connection: close, half-close, drain input, close (handler.h:129-131)
 
-_REQUEST_LINE = re.compile(r"^([^ \t]+)[ \t]+([^ \t]+)[ \t]+[Hh][Tt][Tt][Pp]/([0-9][0-9.]*)$")
+# What the firmware writes when an active connection times out while it still
+# wants input. It writes sizeof() of the literal, so the NUL goes out too, and
+# then closes (server.cpp:481-521).
+GOODBYE = b"HTTP/1.1 408 Request Timeout\r\n\r\n\x00"
+
+_HWS = frozenset(b" \t")  # HorizWhitespace
+_SPACE = frozenset(b" \t\n\v\f\r")  # Whitespace (isspace)
+_LF, _CR, _COLON = 10, 13, 58
+_STORE_MAX = 64 * 1024  # bytes of one name or value kept for the log; the rest is parsed and dropped
+
+_METHODS = {m.lower().encode(): m for m in KNOWN_METHODS}
+
+# How the value parser of each known header (http_server.py:4-15) reads the
+# bytes after the colon:
+# _RAW: read_header_value, joined without fallthrough, so the first byte after
+#   the colon and spaces belongs to the value even when it is CR or LF. A
+#   continuation line's first byte does too. Unknown headers read this way.
+# _KEYWORD: keyworded_header, joined with fallthrough: a line end right after
+#   the colon ends the header. Continuation lines are read as _RAW.
+# _BOUNDARY: read_boundary, fallthrough both after the colon and on
+#   continuation lines.
+# _AUTH: authorization_header, no continuation lines.
+_RAW, _KEYWORD, _BOUNDARY, _AUTH = "raw", "keyword", "boundary", "auth"
+_HEADERS = {
+    b"x-api-key": _RAW,
+    b"authorization": _AUTH,
+    b"content-length": _RAW,
+    b"if-none-match": _RAW,
+    b"print-after-upload": _KEYWORD,
+    b"overwrite": _KEYWORD,
+    b"create-folder": _KEYWORD,
+    b"content-type": _BOUNDARY,
+    b"connection": _KEYWORD,
+    b"accept": _KEYWORD,
+}
+
+
+def _lower(b: int) -> int:
+    return b + 32 if 65 <= b <= 90 else b
+
+
+def _is_prefix(cand: bytes, words) -> bool:
+    return any(w.startswith(cand) for w in words)
 
 
 @dataclass
@@ -78,45 +122,335 @@ class Request:
         return value
 
 
+class HeadParser:
+    """Request head reader that follows the firmware's generated automaton.
+
+    The structure is request() in utils/gen-automata/http.py; the events are
+    RequestParser::event (req_parser.cpp:68-218).
+
+    * The method runs to a space or tab. A byte that leaves the keyword trie is
+      eaten into an unknown method, even a space, CR or LF (parts.py:68-78), so
+      a stray CRLF before "GET" makes an unknown method (405).
+    * The URL runs to the next space or tab, CR and LF included.
+    * Then "HTTP/" in any case, a digit, and digits and dots. Any other byte
+      there has no transition: 400 and close (req_parser.cpp:236-240).
+    * A line ends at LF, CR LF, or a CR followed by anything else, which stays
+      unread (newline(), parts.py:102-122).
+    * Header names go through a trie of the headers the parser knows. A byte
+      that leaves the trie, a colon included, starts an unknown header whose
+      name runs to the next colon, across line ends.
+    * A line starting with a space or tab continues the header.
+    * An empty line ends the head; after a bare CR the next byte is the first
+      byte of the body.
+
+    Authorization is simplified: its scheme runs to the first space or tab and
+    a quoted parameter to its closing quote, both across line ends; otherwise
+    the header ends at the line end.
+    """
+
+    def __init__(self) -> None:
+        self.state = "method"
+        self.done = False
+        self.error: Optional[int] = None
+        self.consumed = 0
+        self.method: Optional[str] = None
+        self._method = bytearray()
+        self._method_unknown = False
+        self._url = bytearray()
+        self._url_len = 0
+        self._http = 0
+        self._version = bytearray()
+        self.version_major = 0
+        self.version_minor = 0
+        self.headers: list[tuple[str, str]] = []
+        self._name = bytearray()
+        self._name_low = b""
+        self._name_mode = "trie"
+        self._kind = _RAW
+        self._value = bytearray()
+
+    def feed(self, data: bytes) -> int:
+        """Read bytes until the head is complete; returns how many were used."""
+        i, n = 0, len(data)
+        while i < n and not self.done:
+            if self._step(data[i]):
+                i += 1
+        self.consumed += i
+        return i
+
+    def eof(self) -> None:
+        """The client closed before the head was complete: 400 (req_parser.cpp:242-246)."""
+        if not self.done:
+            self.error = 400
+            self.done = True
+
+    # --- automaton -------------------------------------------------------------
+
+    def _fail(self) -> bool:
+        self.error = 400
+        self.done = True
+        return False
+
+    def _step(self, b: int) -> bool:
+        """One byte; False means it was not consumed (a fallthrough or the end)."""
+        st = self.state
+        if st == "method":
+            if self._method_unknown:
+                if b in _HWS:
+                    self.state = "meth_sp"
+                elif len(self._method) < _STORE_MAX:
+                    self._method.append(b)
+                return True
+            low = bytes(_lower(c) for c in self._method)
+            if b in _HWS and low in _METHODS:
+                self.method = _METHODS[low]
+                self.state = "meth_sp"
+                return True
+            if not _is_prefix(low + bytes([_lower(b)]), _METHODS):
+                self._method_unknown = True
+            self._method.append(b)
+            return True
+        if st == "meth_sp":
+            if b in _HWS:
+                return True
+            self.state = "url"
+            self._url_byte(b)
+            return True
+        if st == "url":
+            if b in _HWS:
+                self.state = "url_sp"
+            else:
+                self._url_byte(b)
+            return True
+        if st == "url_sp":
+            if b in _HWS:
+                return True
+            if _lower(b) == ord("h"):
+                self.state, self._http = "http", 0
+                return True
+            return self._fail()
+        if st == "http":
+            if _lower(b) != b"ttp/"[self._http]:
+                return self._fail()
+            self._http += 1
+            if self._http == 4:
+                self.state = "slash"
+            return True
+        if st == "slash":
+            if not 48 <= b <= 57:
+                return self._fail()
+            self._version_event(b)
+            self.state = "version"
+            return True
+        if st == "version":
+            if b == 46 or 48 <= b <= 57:
+                self._version_event(b)
+                return True
+            if b == _LF:
+                self.state = "h_start"
+                return True
+            if b == _CR:
+                self.state = "line_cr"
+                return True
+            return self._fail()
+        if st == "line_cr":
+            self.state = "h_start"
+            return b == _LF
+        if st == "h_start":
+            if b == _LF:
+                self.done = True
+                return True
+            if b == _CR:
+                self.state = "h_cr"
+                return True
+            self._name, self._name_low, self._name_mode = bytearray(), b"", "trie"
+            self.state = "h_name"
+            return False
+        if st == "h_cr":
+            self.done = True
+            return b == _LF
+        if st == "h_name":
+            return self._name_byte(b)
+        if st == "h_sep":
+            if b in _HWS:
+                return True
+            self._value = bytearray()
+            if self._kind == _AUTH:
+                self.state = "a_scheme"
+                return False
+            self.state = "h_val"
+            if self._kind == _RAW:
+                self._value_byte(b)
+                return True
+            return False
+        if st == "h_val":
+            if b == _LF:
+                self.state = "h_end"
+            elif b == _CR:
+                self.state = "h_val_cr"
+            else:
+                self._value_byte(b)
+            return True
+        if st == "h_val_cr":
+            self.state = "h_end"
+            return b == _LF
+        if st == "h_end":
+            if b in _HWS and self._kind != _AUTH:
+                self.state = "h_cont"
+                return True
+            self._end_header()
+            self.state = "h_start"
+            return False
+        if st == "h_cont":
+            if b in _HWS:
+                return True
+            self.state = "h_val"
+            if self._kind == _BOUNDARY:
+                return False
+            self._value_byte(b)
+            return True
+        return self._auth_step(st, b)
+
+    def _auth_step(self, st: str, b: int) -> bool:
+        if st == "a_scheme":
+            if b in _HWS:
+                self.state = "a_param"
+            self._value_byte(b)
+            return True
+        if st == "a_param":
+            if b == _LF:
+                self.state = "h_end"
+                return True
+            if b == _CR:
+                self.state = "h_val_cr"
+                return True
+            if b not in _HWS:
+                self.state = "a_name"
+            self._value_byte(b)
+            return True
+        if st == "a_name":
+            if b in _SPACE:
+                self.state = "a_param"
+                return False
+            if b == ord("="):
+                self.state = "a_sep"
+            self._value_byte(b)
+            return True
+        if st == "a_sep":
+            if b in _SPACE or b == ord(","):
+                if b not in _HWS:
+                    self.state = "a_end"
+                    return False
+            elif b == ord('"'):
+                self.state = "a_quoted"
+            else:
+                self.state = "a_unquoted"
+            self._value_byte(b)
+            return True
+        if st == "a_quoted":
+            if b == ord('"'):
+                self.state = "a_end"
+            self._value_byte(b)
+            return True
+        if st == "a_unquoted":
+            if b in _SPACE or b == ord(","):
+                self.state = "a_end"
+                return False
+            self._value_byte(b)
+            return True
+        # a_end
+        if b in _HWS or b == ord(","):
+            self._value_byte(b)
+            return True
+        self.state = "a_param"
+        return False
+
+    def _name_byte(self, b: int) -> bool:
+        mode = self._name_mode
+        if mode == "unknown":
+            if b == _COLON:
+                self._start_value(None)
+            elif len(self._name) < _STORE_MAX:
+                self._name.append(b)
+            return True
+        if mode == "term":  # a complete known name followed by spaces
+            if b == _COLON:
+                self._start_value(self._name_low)
+                return True
+            if b not in _HWS:
+                self._name_mode = "unknown"
+            self._name.append(b)
+            return True
+        if self._name_low in _HEADERS:
+            if b == _COLON:
+                self._start_value(self._name_low)
+                return True
+            if b in _HWS:
+                self._name_mode = "term"
+                self._name.append(b)
+                return True
+        cand = self._name_low + bytes([_lower(b)])
+        if _is_prefix(cand, _HEADERS):
+            self._name_low = cand
+        else:
+            self._name_mode = "unknown"
+        self._name.append(b)
+        return True
+
+    def _start_value(self, known: Optional[bytes]) -> None:
+        self._kind = _HEADERS[known] if known is not None else _RAW
+        self.state = "h_sep"
+
+    def _value_byte(self, b: int) -> None:
+        if len(self._value) < _STORE_MAX:
+            self._value.append(b)
+
+    def _end_header(self) -> None:
+        name = self._name.decode("latin-1").rstrip(" \t")
+        self.headers.append((name, self._value.decode("latin-1")))
+
+    def _url_byte(self, b: int) -> None:
+        self._url_len += 1
+        if len(self._url) < _STORE_MAX:
+            self._url.append(b)
+
+    def _version_event(self, b: int) -> None:
+        """Version digits into the parser's 2- and 4-bit fields (req_parser.cpp:181-190)."""
+        self._version.append(b)
+        if b == 46:
+            self.version_major, self.version_minor = self.version_minor & 0x3, 0
+        else:
+            self.version_minor = (self.version_minor * 10 + b - 48) & 0xF
+
+    # --- result ------------------------------------------------------------------
+
+    def request(self) -> Request:
+        """The parsed request; call once ``done`` is set."""
+        known = self.method is not None
+        req = Request(method=self.method if known else self._method.decode("latin-1"),
+                      target=self._url.decode("latin-1"),
+                      version=("HTTP/" + self._version.decode("latin-1")) if self._version else "",
+                      method_known=known, version_major=self.version_major, version_minor=self.version_minor)
+        if self.state in ("h_end", "h_val", "h_val_cr", "h_cont") or self.state.startswith("a_"):
+            self._end_header()  # a header cut short by the end of input
+            self.state = "h_start"
+        req.headers = list(self.headers)
+        if self._url_len > MAX_URL_LEN:
+            req.error = 414
+        _apply_headers(req)
+        if self.error is not None:
+            req.error = self.error
+        return req
+
+
 def _prefix(value: str, keyword: str) -> bool:
     """keyworded_header: case-insensitive prefix match after leading whitespace."""
     return value.lstrip(" \t").lower().startswith(keyword)
 
 
-def parse_head(lines: list[bytes]) -> Request:
-    """Build a Request from the head lines (CR/LF already stripped)."""
-    text = [line.decode("latin-1") for line in lines]
-    m = _REQUEST_LINE.match(text[0]) if text else None
-    if not m:
-        return Request(method="", target="", version="", error=400)
-    token, target, ver = m.group(1), m.group(2), m.group(3)
-    req = Request(method=token.upper() if token.upper() in KNOWN_METHODS else token,
-                  target=target, version=f"HTTP/{ver}")
-    req.method_known = token.upper() in KNOWN_METHODS
-    # Version digits as the parser accumulates them into 2- and 4-bit fields.
-    major, minor = 0, 0
-    for ch in ver:
-        if ch == ".":
-            major, minor = minor & 0x3, 0
-        else:
-            minor = (minor * 10 + int(ch)) & 0xF
-    req.version_major, req.version_minor = major, minor
-    if len(target) > MAX_URL_LEN:
-        req.error = 414
-
-    headers: list[tuple[str, str]] = []
-    for line in text[1:]:
-        if line[:1] in (" ", "\t") and headers:
-            name, value = headers[-1]
-            headers[-1] = (name, value + line.lstrip(" \t"))
-            continue
-        name, sep, value = line.partition(":")
-        if not sep:
-            continue
-        headers.append((name.rstrip(" \t"), value.lstrip(" \t")))
-    req.headers = headers
-
-    for name, value in headers:
+def _apply_headers(req: Request) -> None:
+    """Header events of RequestParser::event (req_parser.cpp:68-218), in arrival order."""
+    for name, value in req.headers:
         lname = name.lower()
         if lname == "connection":
             if _prefix(value, "close"):
@@ -124,7 +458,7 @@ def parse_head(lines: list[bytes]) -> Request:
             elif _prefix(value, "keep-alive"):
                 req.connection = "keep-alive"
         elif lname == "content-length":
-            # Digits are accumulated across every Content-Length header.
+            # Every byte of every Content-Length value is a digit to the parser.
             cl = req.content_length or 0
             for ch in value:
                 cl = (cl * 10 + (ord(ch) - 48)) & 0xFFFFFFFFFFFFFFFF
@@ -143,17 +477,26 @@ def parse_head(lines: list[bytes]) -> Request:
                 req.create_folder = True
         elif lname == "if-none-match":
             for ch in value:
-                if ch.isdigit():
-                    req.if_none_match = (req.if_none_match * 10 + int(ch)) & 0xFFFFFFFF
+                if "0" <= ch <= "9":  # ASCII only, like the firmware's range check
+                    req.if_none_match = (req.if_none_match * 10 + ord(ch) - 48) & 0xFFFFFFFF
         elif lname == "content-type":
             for part in value.split(";")[1:]:
                 part = part.lstrip(" \t")
                 if part.lower().startswith("boundary="):
                     boundary = re.split(r"[ \t;]", part[len("boundary="):], maxsplit=1)[0]
                     req.boundary = boundary
-                    if req.error is None and len(boundary) > MAX_URL_LEN - len(target):
+                    # The boundary shares the URL buffer (req_parser.cpp:104-111).
+                    if len(boundary) > MAX_URL_LEN - min(len(req.target), MAX_URL_LEN):
                         req.error = 431
-    return req
+
+
+def parse_head(data: bytes) -> Request:
+    """Parse a complete head; input that ends early counts as a client close."""
+    parser = HeadParser()
+    parser.feed(data)
+    parser.eof()
+    return parser.request()
+
 
 
 # --- responses ---------------------------------------------------------------
@@ -230,3 +573,8 @@ def static_response(body: bytes, content_type: str, keep_alive: bool) -> Respons
     head = write_headers(200, content_type, handling, len(body))
     return Response(200, head, body, after=handling, is_json=content_type == "application/json",
                     content_type=content_type)
+
+
+def goodbye() -> Response:
+    """The bare 408 of a connection that stalled while the firmware wanted input."""
+    return Response(408, GOODBYE, after=CLOSE)

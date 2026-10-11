@@ -11,7 +11,9 @@ import asyncio
 import copy
 import json
 import os
+import sys
 import time
+import traceback
 from typing import Any, Optional
 
 from . import auth as authmod
@@ -21,10 +23,7 @@ from .reqlog import RequestLog
 from .storage import Storage
 from .wire import ERROR_CLOSE, KEEP, Request, Response
 
-IDLE_TIMEOUT_S = 60.0  # Server::IDLE_TIMEOUT (server.h:161)
-ACTIVE_TIMEOUT_S = 10.0  # Server::ACTIVE_TIMEOUT (server.h:168)
 LINGER_MAX_S = 60.0
-MAX_HEAD_BYTES = 64 * 1024
 MAX_UPLOAD_BYTES = 512 * 1024 * 1024
 
 HTML_PORTAL = (b"<!doctype html><html><head><title>Sign in</title></head>"
@@ -37,6 +36,33 @@ def _url(host: str, port: int) -> str:
     elif ":" in host:
         host = f"[{host}]"
     return f"http://{host}:{port}"
+
+
+class Input:
+    """What a client sent, with the bytes the head parser left over.
+
+    Pipelined requests and the start of a body can arrive with the head.
+    """
+
+    def __init__(self, reader: asyncio.StreamReader) -> None:
+        self.reader = reader
+        self.buf = bytearray()
+
+    async def fill(self, timeout: float) -> bool:
+        """Wait for more bytes; False at EOF. Raises asyncio.TimeoutError."""
+        data = await asyncio.wait_for(self.reader.read(65536), timeout)
+        if not data:
+            return False
+        self.buf += data
+        return True
+
+    async def read(self, n: int, timeout: float) -> bytes:
+        """Up to n bytes; b"" at EOF. Raises asyncio.TimeoutError."""
+        if not self.buf and not await self.fill(timeout):
+            return b""
+        out = bytes(self.buf[:n])
+        del self.buf[:n]
+        return out
 
 
 class MockCore:
@@ -57,6 +83,7 @@ class MockCore:
         self.log = RequestLog(log_file)
         self.max_upload_bytes = max_upload_bytes
         self.upload_path: Optional[str] = None
+        self.upload_owner: Optional[object] = None
         self.host, self.port = host, port
         self.control_host, self.control_port = control_host, control_port
         self._servers: list[asyncio.base_events.Server] = []
@@ -197,18 +224,17 @@ class MockCore:
         self._tasks.add(task)
         conn_id = self._next_conn
         self._next_conn += 1
+        inp = Input(reader)
         try:
             while True:
-                lines = await self._read_head(reader)
-                if lines is None:
+                req = await self._read_request(inp, writer, conn_id)
+                if req is None or not await self._serve(req, inp, writer, conn_id):
                     break
-                req = wire.parse_head(lines) if lines else Request(method="", target="", version="", error=400)
-                if not await self._serve(req, reader, writer, conn_id):
-                    break
-        except (ConnectionError, OSError, asyncio.IncompleteReadError):
+        except (ConnectionError, OSError, asyncio.IncompleteReadError, asyncio.CancelledError):
             pass
-        except asyncio.CancelledError:
-            pass
+        except Exception:  # a bug in the mock: leave a trace rather than drop the client silently
+            print("prusalink-mock: unexpected error on a printer connection", file=sys.stderr)
+            traceback.print_exc()
         finally:
             self._tasks.discard(task)
             try:
@@ -216,32 +242,38 @@ class MockCore:
             except Exception:
                 pass
 
-    async def _read_head(self, reader: asyncio.StreamReader) -> Optional[list[bytes]]:
-        """Head lines without terminators; [] for an unparseable head; None on EOF or idle timeout."""
-        lines: list[bytes] = []
-        total = 0
+    async def _read_request(self, inp: Input, writer: asyncio.StreamWriter, conn_id: int) -> Optional[Request]:
+        """Read one request head; None closes the connection.
+
+        A connection with no request under way is idle: after IDLE_TIMEOUT, or
+        when the client closes, it is closed without a word. From the first
+        byte of a request it is active (server.cpp:536-560): a stall of
+        ACTIVE_TIMEOUT gets the 408 goodbye (server.cpp:481-521), and a client
+        close gets 400 (req_parser.cpp:242-246).
+        """
+        parser = wire.HeadParser()
         while True:
-            timeout = ACTIVE_TIMEOUT_S if lines else IDLE_TIMEOUT_S
+            if inp.buf:
+                del inp.buf[:parser.feed(bytes(inp.buf))]
+                if parser.done:
+                    return parser.request()
+            started = parser.consumed > 0
             try:
-                line = await asyncio.wait_for(reader.readuntil(b"\n"), timeout)
-            except (asyncio.IncompleteReadError, asyncio.TimeoutError):
+                more = await inp.fill(wire.ACTIVE_TIMEOUT_S if started else wire.IDLE_TIMEOUT_S)
+            except asyncio.TimeoutError:
+                if started:
+                    req = parser.request()
+                    entry = self._entry(req, conn_id)
+                    entry.update(route="invalid", status=408, close=True, error="request head timed out")
+                    self._log(entry, req, None, time.monotonic())
+                    writer.write(wire.GOODBYE)
+                    await writer.drain()
                 return None
-            except asyncio.LimitOverrunError:
-                return []
-            total += len(line)
-            if total > MAX_HEAD_BYTES:
-                return []
-            line = line[:-1]
-            if line.endswith(b"\r"):
-                line = line[:-1]
-            if not lines:
-                lines.append(line)
-                if not line:
-                    return []
-                continue
-            if not line:
-                return lines
-            lines.append(line)
+            if not more:
+                if not started:
+                    return None
+                parser.eof()
+                return parser.request()
 
     def _entry(self, req: Request, conn_id: int) -> dict:
         return {
@@ -261,8 +293,12 @@ class MockCore:
             "fault": None,
         }
 
-    async def _serve(self, req: Request, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
-                     conn_id: int) -> bool:
+    def _log(self, entry: dict, req: Request, auth: Optional[authmod.AuthResult], started: float) -> None:
+        entry["headers"] = [[n, authmod.redact_header(n, v, auth)] for n, v in req.headers]
+        entry["duration_ms"] = round((time.monotonic() - started) * 1000, 1)
+        self.log.add(entry)
+
+    async def _serve(self, req: Request, inp: Input, writer: asyncio.StreamWriter, conn_id: int) -> bool:
         """Answer one request; returns whether the connection stays open."""
         started = time.monotonic()
         entry = self._entry(req, conn_id)
@@ -291,19 +327,16 @@ class MockCore:
                     await asyncio.sleep(action["ms"] / 1000.0)
                 elif kind == "hang":
                     entry["close"] = True
-                    await self._hang(reader, float(action.get("seconds", 30.0)))
+                    await self._hang(inp, float(action.get("seconds", 30.0)))
                     return False
                 elif kind == "drop" and action["when"] == "before_response":
                     entry["close"] = True
-                    await self._linger(reader, writer)
+                    await self._linger(inp, writer)
                     return False
                 elif kind == "status":
                     resp = self._fault_status(req, action)
                 if resp is None:
-                    resp = await routes.route(self, req, auth, reader, entry)
-                    if resp is None:
-                        entry["close"] = True
-                        return False
+                    resp = await self._route(req, auth, inp, entry)
                 if kind == "malformed":
                     resp = self._malformed(req, resp, action)
                 if kind == "drop":  # mid_body
@@ -311,7 +344,7 @@ class MockCore:
                     cut = len(resp.head) + action.get("after_bytes", (len(data) - len(resp.head)) // 2)
                     entry.update(status=resp.status, close=True)
                     writer.write(data[:cut])
-                    await self._linger(reader, writer)
+                    await self._linger(inp, writer)
                     return False
             entry["status"] = resp.status
             entry["close"] = resp.after != KEEP
@@ -320,20 +353,30 @@ class MockCore:
             if resp.after == KEEP:
                 return True
             if resp.after == ERROR_CLOSE:
-                await self._linger(reader, writer)
+                await self._linger(inp, writer)
             return False
         finally:
-            entry["headers"] = [[n, authmod.redact_header(n, v, auth)] for n, v in req.headers]
-            entry["duration_ms"] = round((time.monotonic() - started) * 1000, 1)
-            self.log.add(entry)
+            self._log(entry, req, auth, started)
 
-    async def _linger(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    async def _route(self, req: Request, auth: Optional[authmod.AuthResult], inp: Input, entry: dict) -> Response:
+        try:
+            return await routes.route(self, req, auth, inp, entry)
+        except (ConnectionError, OSError):
+            raise
+        except Exception as exc:  # a bug in the mock: answer 500 rather than close silently
+            print("prusalink-mock: unexpected error while answering a request", file=sys.stderr)
+            traceback.print_exc()
+            entry["error"] = f"prusalink-mock bug: {type(exc).__name__}: {exc}"
+            return wire.status_page(500, ERROR_CLOSE, req.accepts_json, "prusalink-mock bug, see its output")
+
+    async def _linger(self, inp: Input, writer: asyncio.StreamWriter) -> None:
         """Half-close, then read and drop input until the client closes (handler.cpp:15-24).
 
         Closing with unread input would make the kernel send a reset, and the
         client would report a connection error instead of the HTTP status.
         """
         loop = asyncio.get_running_loop()
+        inp.buf.clear()
         try:
             await writer.drain()
             if writer.can_write_eof():
@@ -343,15 +386,15 @@ class MockCore:
                 left = deadline - loop.time()
                 if left <= 0:
                     break
-                data = await asyncio.wait_for(reader.read(65536), min(ACTIVE_TIMEOUT_S, left))
+                data = await asyncio.wait_for(inp.reader.read(65536), min(wire.ACTIVE_TIMEOUT_S, left))
                 if not data:
                     break
         except (asyncio.TimeoutError, ConnectionError, OSError):
             pass
 
-    async def _hang(self, reader: asyncio.StreamReader, seconds: float) -> None:
+    async def _hang(self, inp: Input, seconds: float) -> None:
         async def until_eof() -> None:
-            while await reader.read(65536):
+            while await inp.reader.read(65536):
                 pass
 
         try:

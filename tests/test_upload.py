@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import time
 
 import pytest
@@ -69,7 +70,8 @@ def test_printable_extensions(printer, name):
 
 @pytest.mark.parametrize("target,status,message", [
     ("/api/v1/files/usb/notes.txt", 415, b"Not a GCODE"),
-    ("/api/v1/files/usb/a%3Fb.gcode", 422, b"Filename contains invalid characters"),
+    ("/api/v1/files/usb/a%3Fb.gcode", 404, b"Destination directory does not exist"),
+    ("/api/v1/files/usb/a%FFb.gcode", 404, b"Destination directory does not exist"),
     ("/api/v1/files/usb/../x.gcode", 404, b""),
     ("/api/v1/files/usb/%zz.gcode", 404, b""),
     ("/api/v1/files/local/x.gcode", 403, b""),
@@ -180,3 +182,86 @@ def test_digest_upload_two_legs(printer):
         second = conn.request("PUT", target, [("Authorization", auth), ("Content-Length", "4"), ("Overwrite", "?1")],
                               b"G28\n")
     assert second.status == 201 and printer.file_bytes("digest.gcode") == b"G28\n"
+
+
+GOODBYE = b"HTTP/1.1 408 Request Timeout\r\n\r\n\x00"
+
+
+@pytest.fixture
+def short_timeouts(monkeypatch):
+    from prusalink_mock import wire
+    monkeypatch.setattr(wire, "ACTIVE_TIMEOUT_S", 0.3)
+
+
+def _upload_head(printer, name="a.gcode", length=100, extra=""):
+    return (f"PUT /api/v1/files/usb/{name} HTTP/1.1\r\nX-Api-Key: {printer.password}\r\n"
+            f"Content-Length: {length}\r\n{extra}\r\n").encode()
+
+
+@pytest.mark.parametrize("body", [b"", b"G28\nG1"], ids=["before-body", "mid-body"])
+def test_stalled_upload_gets_the_bare_408(printer, short_timeouts, body):
+    """The transfer's "Connection timeout" result is dropped; only the goodbye goes out (server.cpp:709-730)."""
+    with Conn("127.0.0.1", printer.port) as conn:
+        conn.send(_upload_head(printer) + body)
+        assert conn.read_to_eof() == GOODBYE
+    assert printer.files() == []
+    entry = printer.requests()[-1]
+    assert entry["status"] == 408 and entry["error"] == "body timed out"
+
+
+def test_client_close_before_the_body(printer):
+    """GcodeUpload::step with terminated_by_client (gcode_upload.cpp:380-383)."""
+    with Conn("127.0.0.1", printer.port) as conn:
+        conn.send(_upload_head(printer, extra="Accept: application/json\r\n"))
+        conn.sock.shutdown(socket.SHUT_WR)
+        r = conn.read_response()
+    assert r.status == 400 and r.closed
+    assert r.body == b'{"title": "400: Bad Request","message":"Truncated body"}'
+
+
+def test_client_close_mid_body(printer):
+    """The transfer slot sees the close (server.cpp:785-795, gcode_upload.cpp:302-303)."""
+    with Conn("127.0.0.1", printer.port) as conn:
+        conn.send(_upload_head(printer, extra="Accept: application/json\r\n") + b"G28\nG1")
+        conn.sock.shutdown(socket.SHUT_WR)
+        r = conn.read_response()
+    assert r.status == 400 and r.closed and r.header("Content-Type") == "text/plain"
+    assert r.body == b"400: Bad Request\n\nConnection closed by client\n"
+    assert printer.files() == []
+
+
+@pytest.mark.parametrize("folder", ["a%3Ab", "a%3Fb", "a%FFb", "ok/a%2Ab"])
+@pytest.mark.parametrize("overwrite", [False, True])
+def test_folder_name_fatfs_refuses(printer, folder, overwrite):
+    """make_dirs fails before the rename is tried (gcode_upload.cpp:266-268, path_utils.cpp:35-51)."""
+    r = put(printer, f"/api/v1/files/usb/{folder}/x.gcode", headers=[("Overwrite", "?1")] if overwrite else [])
+    assert r.status == 500 and r.body == b"500: Internal Server Error\n\nFailed to create a folder\n"
+    assert printer.files() == []
+
+
+def test_file_name_fatfs_refuses_with_overwrite(printer):
+    """With Overwrite the name is only tried at the rename: ENOTDIR, plain text (gcode_upload.cpp:224-238)."""
+    r = put(printer, "/api/v1/files/usb/new%20dir/a%3Cb.gcode", headers=[("Overwrite", "?1")], accept_json=True)
+    assert r.status == 404 and r.header("Content-Type") == "text/plain"
+    assert r.body == b"404: Not Found\n\nDestination directory does not exist\n"
+
+
+@pytest.mark.parametrize("name", ["a%01b.gcode", "a%5Cb.gcode", "a\\b.gcode"])
+def test_names_fatfs_would_change_are_not_modeled(printer, name):
+    r = put(printer, f"/api/v1/files/usb/{name}")
+    assert r.status == 501 and b"Not modeled by prusalink-mock" in r.body and r.closed and not r.reset
+
+
+def test_delete_during_an_overwriting_upload(printer):
+    """The PUT writes a temporary file, so its destination can still be deleted (print_utils.cpp:84-117)."""
+    assert put(printer, "/api/v1/files/usb/x.gcode", b"old\n").status == 201
+    with Conn("127.0.0.1", printer.port) as slow:
+        slow.send(_upload_head(printer, "x.gcode", 8, "Overwrite: ?1\r\n") + b"new\n")
+        deadline = time.monotonic() + 10
+        while printer._call(lambda: printer.core.upload_path) is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert get(printer, "/api/v1/files/usb/x.gcode", "DELETE").status == 204
+        assert printer.files() == []
+        slow.send(b"G28\n")
+        assert slow.read_response().status == 201
+    assert printer.file_bytes("x.gcode") == b"new\nG28\n"
