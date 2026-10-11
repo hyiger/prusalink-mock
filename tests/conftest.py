@@ -12,7 +12,7 @@ from prusalink_mock import MockPrinter
 
 TESTS = Path(__file__).parent
 FIXTURES = TESTS / "fixtures" / "firmware"
-GOLDEN = TESTS / "golden" / "mini404-312ad0dc7"
+GOLDEN = TESTS / "golden" / "mini404-v6.9.2-hy.3"
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:

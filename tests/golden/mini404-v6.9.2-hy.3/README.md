@@ -2,7 +2,7 @@
 
 Real responses captured on 2026-10-11 with curl 8.7.1 (macOS) from the
 Mini404 emulator (utils/mini404 in the firmware repo, PrusaLink on port 8080)
-running hyiger/Prusa-Firmware-Buddy commit `312ad0dc7`, built for the CORE One
+running hyiger/Prusa-Firmware-Buddy release `v6.9.2-hy.3` (`d54d239fd`), built for the CORE One
 with filament slots and a test-only patch that enables three tools. The
 `mini404-3tool` scenario mirrors that printer.
 
@@ -13,8 +13,9 @@ with filament slots and a test-only patch that enables three tools. The
 * `three-tools.patch`: the test-only firmware patch. Three tools without an
   MMU, tool mapping and the Load All, Unload All and Change All menus on that
   build, and a purge that fails when the extruder sensor loses the filament.
-* `slots.gcode`: sets the filament slots to the captured state. It was written
-  from the capture afterwards and hasn't been run on the emulator yet.
+* `slots.gcode`: sets the filament slots to the captured state: Polymaker PLA
+  in Red, Prusament PETG in Orange and 3D-Fuel ASA in Green. The capture was
+  taken after printing it, with the printer back on the home screen.
 * `capture.sh`: the requests below, with curl.
 
 In the firmware repo, on a clean checkout of the pinned commit:

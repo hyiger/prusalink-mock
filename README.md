@@ -2,7 +2,7 @@
 
 A mock PrusaLink server that answers the way the Prusa Buddy firmware does, so code that talks to a printer can be tested without one. I built it for PrusaSlicer's "sync filament presets from the printer" work, which reads `GET /api/v1/tools` from a CORE One INDX, but it also handles the calls PrusaSlicer already makes (`/api/version`, `/api/v1/storage` and the PUT upload).
 
-It copies the firmware, not Prusa's OpenAPI spec: the same RFC 2069 Digest, the same headers in the same order, the same JSON bytes, the same quirks. Fixtures and captures are pinned to hyiger/Prusa-Firmware-Buddy commit `312ad0dc7`.
+It copies the firmware, not Prusa's OpenAPI spec: the same RFC 2069 Digest, the same headers in the same order, the same JSON bytes, the same quirks. Fixtures and captures are pinned to hyiger/Prusa-Firmware-Buddy release `v6.9.2-hy.3` (`d54d239fd`).
 
 Python 3.10 or newer, standard library only. GPL-3.0.
 
@@ -190,11 +190,11 @@ Tests marked `contract` check firmware behavior that has to hold on the mock and
 
 They send only GET and HEAD requests, plus requests that fail authentication. `--allow-writes` adds an upload and delete of `/usb/plmock/contract test.gcode`; on a real printer, an upload opens the print preview on the screen. The password is read from the file and never printed; failures show `<secret>` in its place. Keep the `=` in `--password-file=FILE`, or pytest takes the file's folder for the project root.
 
-On Mini404, `--allow-writes` needs the emulated USB drive to be a FAT image (`-drive id=usbstick,format=raw,file=usb.img`). QEMU's `fat:rw:` folder drive crashes the emulator as soon as the firmware creates a folder. The full suite, writes included, passes against Mini404 running `312ad0dc7` with a FAT32 image.
+On Mini404, `--allow-writes` needs the emulated USB drive to be a FAT image (`-drive id=usbstick,format=raw,file=usb.img`). QEMU's `fat:rw:` folder drive crashes the emulator as soon as the firmware creates a folder. The full suite, writes included, passes against Mini404 running `v6.9.2-hy.3` with a FAT32 image.
 
 ## Fidelity
 
-Firmware paths below are in hyiger/Prusa-Firmware-Buddy at `312ad0dc7`.
+Firmware paths below are in hyiger/Prusa-Firmware-Buddy at `v6.9.2-hy.3` (`d54d239fd`).
 
 Modeled:
 

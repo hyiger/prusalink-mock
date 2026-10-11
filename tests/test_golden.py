@@ -1,7 +1,7 @@
 """The mini404-3tool scenario against real responses captured from the Mini404 emulator.
 
-tests/golden/mini404-312ad0dc7 holds what curl saw (every hop of each Digest
-exchange) from firmware 312ad0dc7. The mock must send the same status lines,
+tests/golden/mini404-v6.9.2-hy.3 holds what curl saw (every hop of each Digest
+exchange) from firmware v6.9.2-hy.3. The mock must send the same status lines,
 headers and bodies; only nonce values may differ.
 """
 

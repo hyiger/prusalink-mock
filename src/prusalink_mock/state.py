@@ -67,7 +67,7 @@ MODELS: dict[str, dict[str, Any]] = {
 PRINTER_STATES = ("IDLE", "BUSY", "PRINTING", "PAUSED", "FINISHED", "STOPPED", "ATTENTION", "ERROR")
 JOB_STATES = ("PRINTING", "PAUSED")
 
-# src/common/filament_library.cpp:19-60
+# src/common/filament_library.cpp:19-61
 PRESET_VENDORS = (
     "Generic", "Prusament", "Polymaker", "Bambu Lab", "eSun", "Elegoo", "Sunlu", "Overture",
     "Hatchbox", "Inland", "3D-Fuel", "Fillamentum", "Fiberlogy", "Spectrum", "Extrudr", "colorFabb",
@@ -75,7 +75,7 @@ PRESET_VENDORS = (
 PRESET_COLORS = {
     "Red": "#FF0000", "Green": "#008000", "Blue": "#0000FF", "Cyan": "#00FFFF",
     "Magenta": "#FF00FF", "Yellow": "#FFFF00", "Black": "#000000", "White": "#FFFFFF",
-    "Orange": "#FFA500", "Brown": "#8B4513", "Gray": "#808080", "Purple": "#800080",
+    "Orange": "#F8651B", "Brown": "#8B4513", "Gray": "#808080", "Purple": "#800080",
     "Pink": "#FFC0CB", "Silver": "#C0C0C0", "Natural": "#F5F5DC", "Gold": "#FFD700",
 }
 # src/common/filament_presets.cpp
@@ -91,7 +91,7 @@ SFN_PATH_MAX = 102  # char[max_path_length] (basic_gets.cpp:411, filename_defs.h
 HEX_RE = re.compile(r"#[0-9A-F]{6}")
 # filament_common.cpp:37-42 (isalnum in the C locale is ASCII only)
 MATERIAL_RE = re.compile(r"[A-Za-z0-9_-]+")
-# is_valid_name_char, filament_library.cpp:104-106
+# is_valid_name_char, filament_library.cpp:105-107
 LIBRARY_NAME_RE = re.compile(r"[A-Za-z0-9 _\-.+&]+")
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
@@ -387,16 +387,16 @@ def _material_name(name: str) -> Optional[str]:
 
 
 def _library_name(presets: Iterable[str]) -> Callable[[str], Optional[str]]:
-    """FilamentLibraryItem::can_be_renamed_to (filament_library.cpp:157-182): what a user
+    """FilamentLibraryItem::can_be_renamed_to (filament_library.cpp:158-183): what a user
     vendor or color can be called. A name that matches a preset in any case is that preset."""
     def check(name: str) -> Optional[str]:
         if name[0] == " " or name[-1] == " " or not LIBRARY_NAME_RE.fullmatch(name):
             return ("a library name is 'a-zA-Z0-9 _-.+&' with no space at either end "
-                    "(filament_library.cpp:104-106, 171-173)")
+                    "(filament_library.cpp:105-107, 172-174)")
         for preset in presets:
             if preset != name and preset.lower() == name.lower():
                 return (f"is the preset {preset!r}, spelled that way; no user entry can take a "
-                        f"preset's name (filament_library.cpp:175-179)")
+                        f"preset's name (filament_library.cpp:176-180)")
         return None
     return check
 
@@ -427,7 +427,7 @@ def _tool(v: _V, raw: Any, path: str) -> dict:
     if color_hex and not HEX_RE.fullmatch(color_hex):
         v.err(f"{path}/color_hex", "must match #RRGGBB with uppercase hex digits, or be empty")
     elif color in PRESET_COLORS and color_hex and color_hex != PRESET_COLORS[color]:
-        v.err(f"{path}/color_hex", f"the preset {color} is always {PRESET_COLORS[color]} (filament_library.cpp:44-61)")
+        v.err(f"{path}/color_hex", f"the preset {color} is always {PRESET_COLORS[color]} (filament_library.cpp:44-62)")
     if color_hex and not color:
         v.err(f"{path}/color_hex", "must be empty when no color is picked")
     if color and not color_hex:
@@ -449,7 +449,7 @@ def _tool(v: _V, raw: Any, path: str) -> dict:
 
 
 def _check_library(v: _V, tools: dict[str, dict]) -> None:
-    """Tools pick their vendor and color from one library (filament_library.cpp:121-182).
+    """Tools pick their vendor and color from one library (filament_library.cpp:122-183).
 
     A user entry has one name, unique in any case, and a user color one RGB value, so
     tools that name the same entry agree on both. (The library's 8 user vendors and

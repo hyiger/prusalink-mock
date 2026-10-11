@@ -23,7 +23,7 @@
     "2": {"loaded": true, "material": "PETG", "vendor": "Overture", "color": "Black", "color_hex": "#000000", "nozzle_diameter": 0.6, "hardened": false, "high_flow": true},
     "3": {"loaded": true, "material": "ASA", "vendor": "Overture", "color": "Gray", "color_hex": "#808080", "nozzle_diameter": 0.6, "hardened": false, "high_flow": true},
     "4": {"loaded": false, "material": "", "vendor": "", "color": "", "color_hex": "", "nozzle_diameter": 0.6, "hardened": false, "high_flow": true},
-    "5": {"loaded": true, "material": "PETG", "vendor": "Prusament", "color": "Orange", "color_hex": "#FFA500", "nozzle_diameter": 0.6, "hardened": false, "high_flow": true},
+    "5": {"loaded": true, "material": "PETG", "vendor": "Prusament", "color": "Orange", "color_hex": "#F8651B", "nozzle_diameter": 0.6, "hardened": false, "high_flow": true},
     "6": {"loaded": false, "material": "", "vendor": "", "color": "", "color_hex": "", "nozzle_diameter": 0.6, "hardened": false, "high_flow": true},
     "7": {"loaded": true, "material": "PCTG", "vendor": "3D-Fuel", "color": "Black", "color_hex": "#000000", "nozzle_diameter": 0.6, "hardened": false, "high_flow": true},
     "8": {"loaded": false, "material": "", "vendor": "", "color": "", "color_hex": "", "nozzle_diameter": 0.6, "hardened": false, "high_flow": true}

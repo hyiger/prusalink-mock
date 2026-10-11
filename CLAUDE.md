@@ -24,10 +24,9 @@ listed under Fidelity in README.md.
 ## Pinned firmware
 
 Fixtures (`tests/fixtures/firmware`) and captures
-(`tests/golden/mini404-312ad0dc7`) come from hyiger/Prusa-Firmware-Buddy
-commit `312ad0dc7` on `feat/filament-slots-load-all`. `/api/v1/tools` arrived
-in `08968e64f`, which is on that branch and `release/6.9.2`, not on `master`
-or any tag yet.
+(`tests/golden/mini404-v6.9.2-hy.3`) come from hyiger/Prusa-Firmware-Buddy
+release `v6.9.2-hy.3` (`d54d239fd` on `release/6.9.2`). `/api/v1/tools`
+arrived in `08968e64f`, which is on `release/6.9.2` but not on `master`.
 
 When the firmware's PrusaLink code changes (`lib/WUI/`,
 `src/common/json_encode.cpp`, `src/common/http/`, `utils/gen-automata/`),
@@ -38,7 +37,7 @@ mirror it here:
 3. Recapture goldens from the Mini404 emulator (`utils/mini404` in the
    firmware repo, PrusaLink on `http://127.0.0.1:8080`) into
    `tests/golden/mini404-<commit>/`, with the patch, slot G-code and capture
-   script in `tests/golden/mini404-312ad0dc7/kit` (its README has the steps).
+   script in `tests/golden/mini404-v6.9.2-hy.3/kit` (its README has the steps).
    Plain `utils/mini404` has one tool. Then run the contract suite against it:
    `pytest -m contract --target http://127.0.0.1:8080 --password-file=FILE`.
 4. Update the pinned commit here, in README.md and in the fixture READMEs.

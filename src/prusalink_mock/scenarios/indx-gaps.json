@@ -19,7 +19,7 @@
   "auth": {"password": "mockKeyTest2345"},
   "storage": {"available": true},
   "tools": {
-    "1": {"loaded": true, "material": "PLA", "vendor": "Prusament", "color": "Orange", "color_hex": "#FFA500", "nozzle_diameter": 0.4, "hardened": false, "high_flow": false},
+    "1": {"loaded": true, "material": "PLA", "vendor": "Prusament", "color": "Orange", "color_hex": "#F8651B", "nozzle_diameter": 0.4, "hardened": false, "high_flow": false},
     "2": {"loaded": true, "material": "PETG", "vendor": "Polymaker", "color": "Black", "color_hex": "#000000", "nozzle_diameter": 0.4, "hardened": false, "high_flow": false},
     "3": {"loaded": false, "material": "", "vendor": "", "color": "", "color_hex": "", "nozzle_diameter": 0.4, "hardened": false, "high_flow": false},
     "5": {"loaded": true, "material": "PA", "vendor": "", "color": "", "color_hex": "", "nozzle_diameter": 0.6, "hardened": true, "high_flow": true}

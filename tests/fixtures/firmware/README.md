@@ -1,8 +1,8 @@
 # Firmware fixtures
 
 Response bodies reconstructed byte for byte from the Buddy firmware source at
-hyiger/Prusa-Firmware-Buddy commit `312ad0dc7` (branch
-`feat/filament-slots-load-all`). They are raw bodies with no trailing newline:
+hyiger/Prusa-Firmware-Buddy release `v6.9.2-hy.3` (`d54d239fd` on
+`release/6.9.2`). They are raw bodies with no trailing newline:
 don't reformat them.
 
 Serial numbers, temperatures and timestamps are placeholders. The scenarios
