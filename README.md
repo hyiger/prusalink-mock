@@ -14,7 +14,7 @@ From a checkout, nothing to install:
 PYTHONPATH=src python -m prusalink_mock serve
 ```
 
-On Windows, `set PYTHONPATH=src` first. Or `pip install -e .` and use `plmock serve`.
+On Windows, set it first: `$env:PYTHONPATH = "src"` in PowerShell, `set PYTHONPATH=src` in cmd. Or `pip install -e .` and use `plmock serve`.
 
 ```
 PrusaLink mock, scenario indx-hy8: http://127.0.0.1:8088
