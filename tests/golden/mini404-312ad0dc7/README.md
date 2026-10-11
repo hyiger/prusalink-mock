@@ -6,6 +6,37 @@ running hyiger/Prusa-Firmware-Buddy commit `312ad0dc7`, built for the CORE One
 with filament slots and a test-only patch that enables three tools. The
 `mini404-3tool` scenario mirrors that printer.
 
+## Capturing again
+
+`kit/` holds what it takes:
+
+* `three-tools.patch`: the test-only firmware patch. Three tools without an
+  MMU, tool mapping and the Load All, Unload All and Change All menus on that
+  build, and a purge that fails when the extruder sensor loses the filament.
+* `slots.gcode`: sets the filament slots to the captured state. It was written
+  from the capture afterwards and hasn't been run on the emulator yet.
+* `capture.sh`: the requests below, with curl.
+
+In the firmware repo, on a clean checkout of the pinned commit:
+
+```sh
+git apply PATH/TO/kit/three-tools.patch
+utils/mini404/stage.sh -DHAS_FILAMENT_SLOTS:BOOL=YES
+cp PATH/TO/kit/slots.gcode build/mini404/usb/
+utils/mini404/start.sh
+```
+
+Print `slots.gcode` from the printer's screen, write the PrusaLink password
+(Settings > Network > PrusaLink) to a file, and capture into a new folder:
+
+```sh
+PATH/TO/kit/capture.sh PASSWORD_FILE tests/golden/mini404-<commit>
+```
+
+Then point `GOLDEN` in tests/conftest.py at it. The scenario must keep
+matching: if the serial, firmware version or temperatures differ, update
+`mini404-3tool`.
+
 * `<name>.headers`: every response head curl saw, in order (for Digest, the
   401 challenge first).
 * `<name>.body`: the body of the last response.

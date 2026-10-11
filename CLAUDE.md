@@ -37,7 +37,9 @@ mirror it here:
 2. Rebuild the affected fixtures from the source.
 3. Recapture goldens from the Mini404 emulator (`utils/mini404` in the
    firmware repo, PrusaLink on `http://127.0.0.1:8080`) into
-   `tests/golden/mini404-<commit>/`, and run the contract suite against it:
+   `tests/golden/mini404-<commit>/`, with the patch, slot G-code and capture
+   script in `tests/golden/mini404-312ad0dc7/kit` (its README has the steps).
+   Plain `utils/mini404` has one tool. Then run the contract suite against it:
    `pytest -m contract --target http://127.0.0.1:8080 --password-file=FILE`.
 4. Update the pinned commit here, in README.md and in the fixture READMEs.
 

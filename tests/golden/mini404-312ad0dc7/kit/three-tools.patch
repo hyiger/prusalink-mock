@@ -1,0 +1,171 @@
+diff -ru a/src/common/multi_filament_change.cpp b/src/common/multi_filament_change.cpp
+--- a/src/common/multi_filament_change.cpp	2026-10-10 20:12:59
++++ b/src/common/multi_filament_change.cpp	2026-10-10 20:13:00
+@@ -187,7 +187,7 @@
+             break;
+ 
+         case Action::unload: {
+-#if HAS_MMU2()
++#if 0 // MINI404 TEST ONLY: was HAS_MMU2()
+             config_store().set_filament_type(tool, FilamentType::none);
+ #else
+             filament_gcodes::M702_unload(
+@@ -201,7 +201,7 @@
+         }
+ 
+         case Action::change: {
+-#if HAS_MMU2()
++#if 0 // MINI404 TEST ONLY: was HAS_MMU2()
+             // preload the MMU slot
+             filament_gcodes::mmu_load(tool.to_raw());
+ 
+diff -ru a/src/common/print_utils.cpp b/src/common/print_utils.cpp
+--- a/src/common/print_utils.cpp	2026-10-10 20:18:30
++++ b/src/common/print_utils.cpp	2026-10-10 20:18:30
+@@ -122,7 +122,7 @@
+ #if HAS_TOOLCHANGER()
+     return prusa_toolchanger.get_num_enabled_tools();
+ #elif HAS_MMU2()
+-    return MMU2::mmu2.Enabled() ? EXTRUDERS : 1; // MMU has all slots available
++    return MMU2::mmu2.Enabled() ? EXTRUDERS : 3; // MINI404 TEST ONLY: was 1
+ #else
+     return EXTRUDERS;
+ #endif
+diff -ru a/src/common/tool_index.cpp b/src/common/tool_index.cpp
+--- a/src/common/tool_index.cpp	2026-10-10 20:12:59
++++ b/src/common/tool_index.cpp	2026-10-10 20:13:00
+@@ -97,8 +97,8 @@
+         return true;
+ 
+     } else {
+-        // Without the MMU, we only have one virtual tool available (there's nothing that would do the toolchange)
+-        return self.to_raw() == 0;
++        // MINI404 TEST ONLY: three tools without the MMU, to show the multi-tool Load All / Change All
++        return self.to_raw() < 3;
+     }
+ #else
+     // Single nozzle, single slot - nothing to get disabled
+diff -ru a/src/common/tools_mapping.cpp b/src/common/tools_mapping.cpp
+--- a/src/common/tools_mapping.cpp	2026-10-10 20:13:00
++++ b/src/common/tools_mapping.cpp	2026-10-10 20:13:00
+@@ -21,9 +21,7 @@
+ bool is_tool_mapping_possible() {
+ #if HAS_TOOL_MAPPING()
+     #if HAS_MMU2()
+-    if (!MMU2::mmu2.Enabled()) {
+-        return false;
+-    }
++    // MINI404 TEST ONLY: tool mapping without the MMU
+     #endif
+     return GCodeInfo::getInstance().UsedExtrudersCount() > 1 || (get_num_of_enabled_tools() > 1 && GCodeInfo::getInstance().UsedExtrudersCount() > 0);
+ #endif
+diff -ru a/src/gui/MItem_filament.cpp b/src/gui/MItem_filament.cpp
+--- a/src/gui/MItem_filament.cpp	2026-10-10 20:12:59
++++ b/src/gui/MItem_filament.cpp	2026-10-10 20:13:00
+@@ -7,6 +7,7 @@
+ #include "ScreenHandler.hpp"
+ #include <window_msgbox.hpp>
+ #include <option/has_toolchanger.h>
++#include <option/has_mmu2.h>
+ #include <window_dlg_wait.hpp>
+ 
+ #if HAS_TOOLCHANGER()
+@@ -14,6 +15,9 @@
+     #include <gui/dialogs/dialog_tool_select.hpp>
+     #include "screen_menu_filament_changeall.hpp"
+ #endif
++#if !HAS_TOOLCHANGER() && HAS_MMU2() // MINI404 TEST ONLY
++    #include "screen_menu_filament_changeall.hpp"
++#endif
+ #include <config_store/store_instance.hpp>
+ 
+ namespace {
+@@ -35,6 +39,14 @@
+     return (any_tool_configured() && !PhysicalToolIndex::single_enabled_tool().has_value()) ? expands_t::yes : expands_t::no;
+ }
+ 
++is_hidden_t multi_tool_hidden() {
++#if HAS_TOOLCHANGER()
++    return prusa_toolchanger.is_toolchanger_enabled() ? is_hidden_t::no : is_hidden_t::yes;
++#else
++    return is_hidden_t::no; // MINI404 TEST ONLY
++#endif
++}
++
+ } // namespace
+ 
+ #if HAS_TOOLCHANGER()
+@@ -124,11 +136,11 @@
+     marlin_client::gcode("M1600 R"); // non print filament change
+ }
+ 
+-#if HAS_TOOLCHANGER()
++#if HAS_TOOLCHANGER() || HAS_MMU2() // MINI404 TEST ONLY
+ /*****************************************************************************/
+ // MI_CHANGEALL
+ MI_CHANGEALL::MI_CHANGEALL()
+-    : IWindowMenuItem(_(label), nullptr, any_tool_configured() ? is_enabled_t::yes : is_enabled_t::no, prusa_toolchanger.is_toolchanger_enabled() ? is_hidden_t::no : is_hidden_t::yes, expands_t::yes) {}
++    : IWindowMenuItem(_(label), nullptr, any_tool_configured() ? is_enabled_t::yes : is_enabled_t::no, multi_tool_hidden(), expands_t::yes) {}
+ 
+ void MI_CHANGEALL::click(IWindowMenu &) {
+     Screens::Access()->Open(ScreenFactory::Screen<ScreenChangeAllFilaments>);
+@@ -137,7 +149,7 @@
+ /*****************************************************************************/
+ // MI_LOAD_ALL
+ MI_LOAD_ALL::MI_LOAD_ALL()
+-    : IWindowMenuItem(_(label), nullptr, any_tool_configured() ? is_enabled_t::yes : is_enabled_t::no, prusa_toolchanger.is_toolchanger_enabled() ? is_hidden_t::no : is_hidden_t::yes, expands_t::yes) {}
++    : IWindowMenuItem(_(label), nullptr, any_tool_configured() ? is_enabled_t::yes : is_enabled_t::no, multi_tool_hidden(), expands_t::yes) {}
+ 
+ void MI_LOAD_ALL::click(IWindowMenu &) {
+     Screens::Access()->Open(ScreenFactory::ScreenWithArg<ScreenChangeAllFilaments>(ScreenChangeAllFilaments::SetupLoadAll {}));
+@@ -146,7 +158,7 @@
+ /*****************************************************************************/
+ // MI_UNLOAD_ALL
+ MI_UNLOAD_ALL::MI_UNLOAD_ALL()
+-    : IWindowMenuItem(_(label), nullptr, static_cast<is_enabled_t>(any_tool_has_filament()), prusa_toolchanger.is_toolchanger_enabled() ? is_hidden_t::no : is_hidden_t::yes, expands_t::yes) {}
++    : IWindowMenuItem(_(label), nullptr, static_cast<is_enabled_t>(any_tool_has_filament()), multi_tool_hidden(), expands_t::yes) {}
+ 
+ void MI_UNLOAD_ALL::click(IWindowMenu &) {
+     Screens::Access()->Open(ScreenFactory::ScreenWithArg<ScreenChangeAllFilaments>(ScreenChangeAllFilaments::SetupUnloadAll {}));
+diff -ru a/src/gui/screen_menu_filament.hpp b/src/gui/screen_menu_filament.hpp
+--- a/src/gui/screen_menu_filament.hpp	2026-10-10 20:12:59
++++ b/src/gui/screen_menu_filament.hpp	2026-10-10 20:13:00
+@@ -9,6 +9,7 @@
+ #include "MItem_menus.hpp"
+ #include "MItem_tools.hpp"
+ #include <option/has_toolchanger.h>
++#include <option/has_mmu2.h>
+ #include <option/has_wastebin_fill_tracking.h>
+ #include <gui/screen/filament/screen_filaments_loaded.hpp>
+ #include <option/has_filament_slots.h>
+@@ -25,15 +26,15 @@
+ #if HAS_WASTEBIN_FILL_TRACKING()
+     MI_NOZZLE_CLEANER_EMPTY_WASTEBIN,
+ #endif
+-#if HAS_TOOLCHANGER()
++#if HAS_TOOLCHANGER() || HAS_MMU2() // MINI404 TEST ONLY
+     MI_LOAD_ALL,
+ #endif
+     MI_LOAD,
+-#if HAS_TOOLCHANGER()
++#if HAS_TOOLCHANGER() || HAS_MMU2() // MINI404 TEST ONLY
+     MI_UNLOAD_ALL,
+ #endif
+     MI_UNLOAD,
+-#if HAS_TOOLCHANGER()
++#if HAS_TOOLCHANGER() || HAS_MMU2() // MINI404 TEST ONLY
+     MI_CHANGEALL,
+ #endif
+     MI_CHANGE,
+--- a/src/marlin_stubs/pause/pause.cpp	2026-10-10 20:48:31
++++ b/src/marlin_stubs/pause/pause.cpp	2026-10-10 20:48:31
+@@ -804,7 +804,8 @@
+     const auto purge_result = do_e_move_notify_progress_hotextrude(
+         settings.purge_length(), standard_feedrates::extruder(standard_feedrates::Extruder::advanced_pause_purge, filament::get_type_to_load()), StopConditions::All);
+ 
+-    if (purge_result == StopConditions::SideFilamentSensorRunout) {
++    // MINI404 TEST ONLY: the side sensor cannot be driven, so filament pulled from the extruder sensor during the purge fails it
++    if (purge_result == StopConditions::SideFilamentSensorRunout || FSensors_instance().no_filament_surely(LogicalFilamentSensor::extruder)) {
+         set(LoadState::runout_during_load);
+         return false;
+     }
