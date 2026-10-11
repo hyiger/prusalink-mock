@@ -1,0 +1,31 @@
+{
+  "schema": "prusalink-mock/scenario@1",
+  "name": "login-disabled",
+  "description": "indx-hy8 with an empty password: login is disabled and every /api request gets 401, whatever the credentials.",
+  "firmware": {"version": "6.9.2+0", "has_filament_slots": true},
+  "printer": {
+    "model": "COREONEINDX",
+    "serial": "CZPX0000X000XC00000",
+    "min_extrusion_temp": 170,
+    "state": "IDLE",
+    "active_tool": 0,
+    "bed": {"actual": 23.4, "target": 0.0},
+    "nozzle": {"actual": 0.0, "target": 0.0},
+    "axis": {"x": 241.0, "y": 170.0, "z": 5.0},
+    "flow": 100,
+    "speed": 100,
+    "fans": {"hotend": 0, "print": 0}
+  },
+  "auth": {"password": ""},
+  "storage": {"available": true},
+  "tools": {
+    "1": {"loaded": true, "material": "PLA", "vendor": "Overture", "color": "White", "color_hex": "#FFFFFF", "nozzle_diameter": 0.4, "hardened": false, "high_flow": true},
+    "2": {"loaded": true, "material": "PETG", "vendor": "Overture", "color": "Black", "color_hex": "#000000", "nozzle_diameter": 0.4, "hardened": false, "high_flow": true},
+    "3": {"loaded": true, "material": "ASA", "vendor": "Overture", "color": "Gray", "color_hex": "#808080", "nozzle_diameter": 0.4, "hardened": false, "high_flow": true},
+    "4": {"loaded": false, "material": "", "vendor": "", "color": "", "color_hex": "", "nozzle_diameter": 0.4, "hardened": false, "high_flow": true},
+    "5": {"loaded": true, "material": "PETG", "vendor": "Prusament", "color": "Orange", "color_hex": "#F8651B", "nozzle_diameter": 0.4, "hardened": false, "high_flow": true},
+    "6": {"loaded": false, "material": "", "vendor": "", "color": "", "color_hex": "", "nozzle_diameter": 0.4, "hardened": false, "high_flow": true},
+    "7": {"loaded": true, "material": "PCTG", "vendor": "3D-Fuel", "color": "Black", "color_hex": "#000000", "nozzle_diameter": 0.4, "hardened": false, "high_flow": true},
+    "8": {"loaded": false, "material": "", "vendor": "", "color": "", "color_hex": "", "nozzle_diameter": 0.4, "hardened": false, "high_flow": true}
+  }
+}

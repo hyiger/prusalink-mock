@@ -1,0 +1,58 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "prusalink-mock"
+version = "0.1.0"
+description = "Mock PrusaLink server that answers like the Prusa Buddy firmware, for testing slicers without a printer"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Hyiger" },
+]
+requires-python = ">=3.10"
+dependencies = []
+keywords = ["prusalink", "prusa", "3d-printing", "prusaslicer", "mock", "testing"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Testing :: Mocking",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+plmock = "prusalink_mock.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/hyiger/prusalink-mock"
+Repository = "https://github.com/hyiger/prusalink-mock"
+"Bug Tracker" = "https://github.com/hyiger/prusalink-mock/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/prusalink_mock"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/",
+    "tests/",
+    "README.md",
+    "LICENSE",
+    "pyproject.toml",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]
+markers = [
+    "contract: firmware behavior checks that also run against a live target (--target URL --password-file=FILE)",
+]
