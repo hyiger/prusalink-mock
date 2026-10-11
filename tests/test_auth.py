@@ -182,3 +182,12 @@ def test_reboot_keeps_the_wall_clock():
 
 def test_digest_client_repr_hides_the_password():
     assert "s3cret" not in repr(auth.DigestClient("s3cret"))
+
+
+def test_overlapping_passwords_are_redacted_whole():
+    from prusalink_mock.auth import scrub_value
+    assert scrub_value("x oldsecretNEW y", "oldsecret", "oldsecretNEW") == "x <redacted> y"
+    assert scrub_value("x oldsecretNEW y", "oldsecretNEW", "oldsecret") == "x <redacted> y"
+    assert scrub_value("abcz", "abc", "bcz") == "<redacted>"
+    assert scrub_value("aaa", "aa") == "<redacted>"
+    assert scrub_value({"t": ["a%41b", 1]}, "aAb", "") == {"t": ["<redacted>", 1]}

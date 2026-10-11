@@ -322,17 +322,44 @@ def _password_pattern(password: str) -> "re.Pattern[str]":
     return re.compile("".join(parts))
 
 
-def scrub_value(value, password: str):
-    """``value`` with the password redacted from every string in it, for the request
-    log: a client can send it in the target, a file name or a header, encoded or not."""
-    if not password:
+def _redact(text: str, passwords: Sequence[str]) -> str:
+    """``text`` with every occurrence of any of the passwords replaced by one <redacted>.
+
+    Occurrences are found overlapping, and overlapping or adjacent ones are merged
+    before replacing, so no part of a password survives one that contains or overlaps
+    it (oldsecret and oldsecretNEW, say)."""
+    spans = []
+    for password in passwords:
+        if password:
+            lookahead = re.compile(f"(?=({_password_pattern(password).pattern}))")
+            spans.extend(m.span(1) for m in lookahead.finditer(text))
+    if not spans:
+        return text
+    spans.sort()
+    merged = [list(spans[0])]
+    for start, end in spans[1:]:
+        if start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    out, last = [], 0
+    for start, end in merged:
+        out += [text[last:start], "<redacted>"]
+        last = end
+    return "".join(out) + text[last:]
+
+
+def scrub_value(value, *passwords: str):
+    """``value`` with the passwords redacted from every string in it, for the request
+    log: a client can send one in the target, a file name or a header, encoded or not."""
+    if not any(passwords):
         return value
     if isinstance(value, str):
-        return _password_pattern(password).sub("<redacted>", value)
+        return _redact(value, passwords)
     if isinstance(value, dict):
-        return {k: scrub_value(v, password) for k, v in value.items()}
+        return {k: scrub_value(v, *passwords) for k, v in value.items()}
     if isinstance(value, list):
-        return [scrub_value(v, password) for v in value]
+        return [scrub_value(v, *passwords) for v in value]
     return value
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import socket
 import threading
+import json
 import time
 
 import pytest
@@ -360,3 +361,14 @@ def test_job_id_is_read_like_strtol():
         assert job("DELETE", "/api/v1/job/+ 42") == 400
         assert job("GET", "/api/v1/job") == 200  # still printing
         assert job("DELETE", "/api/v1/job/" + "0" * 31 + "42") == 204  # 33 bytes fit
+
+
+def test_stalled_head_is_scrubbed_with_the_password_it_began_under(printer, short_timeouts):
+    old = printer.password
+    with Conn("127.0.0.1", printer.port) as conn:
+        conn.sock.sendall(f"GET /api/version?token={old} HTTP/1.1\r\nX-Api-Key: {old}\r\n".encode())
+        time.sleep(0.05)  # the head has begun, under the old password
+        printer.patch_state({"auth": {"password": "newKey123"}})
+        time.sleep(0.6)  # past the active timeout
+    entries = json.dumps(printer.requests())
+    assert "request head timed out" in entries and old not in entries

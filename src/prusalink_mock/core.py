@@ -315,20 +315,29 @@ class MockCore:
         close gets 400 (req_parser.cpp:242-246).
         """
         parser = wire.HeadParser()
+        password: Optional[str] = None  # when the request's first byte arrived
+
+        def request() -> Request:
+            req = parser.request()
+            req.arrival_password = self.password if password is None else password
+            return req
+
         while True:
             if inp.buf:
                 del inp.buf[:parser.feed(bytes(inp.buf))]
+                if password is None and parser.consumed > 0:
+                    password = self.password
                 if parser.done:
-                    return parser.request()
+                    return request()
             started = parser.consumed > 0
             try:
                 more = await inp.fill(wire.ACTIVE_TIMEOUT_S if started else wire.IDLE_TIMEOUT_S)
             except asyncio.TimeoutError:
                 if started:
-                    req = parser.request()
+                    req = request()
                     entry = self._entry(req, conn_id)
                     entry.update(route="invalid", status=408, close=True, error="request head timed out")
-                    self._log(entry, req, None, time.monotonic(), self.password)
+                    self._log(entry, req, None, time.monotonic(), req.arrival_password)
                     writer.write(wire.GOODBYE)
                     await writer.drain()
                 return None
@@ -336,7 +345,7 @@ class MockCore:
                 if not started:
                     return None
                 parser.eof()
-                return parser.request()
+                return request()
 
     def _entry(self, req: Request, conn_id: int) -> dict:
         return {
@@ -363,9 +372,8 @@ class MockCore:
         entry["headers"] = [[n, authmod.redact_header(n, v, auth, request_password)] for n, v in req.headers]
         # The password can also come in the target, a file name, any header or other text the
         # client sent, encoded or not
-        for password in {request_password, self.password}:
-            for key, value in entry.items():
-                entry[key] = authmod.scrub_value(value, password)
+        for key, value in entry.items():
+            entry[key] = authmod.scrub_value(value, request_password, self.password)
         entry["duration_ms"] = round((time.monotonic() - started) * 1000, 1)
         self.log.add(entry)
 
@@ -377,7 +385,7 @@ class MockCore:
         """
         started = time.monotonic()
         generation = self.generation
-        request_password = self.password
+        request_password = req.arrival_password
         entry = self._entry(req, conn_id)
         auth: Optional[authmod.AuthResult] = None
         logged = False

@@ -278,7 +278,7 @@ def test_an_explicit_password_still_changes_it(printer):
     b'{"printer":' + b'{"a":' * 1000 + b"1" + b"}" * 1001,
     b'{"tools":' + b"[" * 800 + b"]" * 800 + b"}",
     b'{"name":' + b"[" * 100000 + b"]" * 100000 + b"}",
-])
+], ids=["array-600", "object-1000", "tools-800", "array-100000"])  # Windows caps the test id env variable
 def test_deep_nesting_is_a_client_error(printer, body):
     status, payload = call(printer, "PATCH", "/_mock/state", body)
     assert status in (400, 422), payload
@@ -436,7 +436,7 @@ def raw_control(printer, data: bytes) -> tuple[int, dict]:
     (b"POST /_mock/clock/advance HTTP/1.1\r\nContent-Length: " + b"9" * 5000 + b"\r\n\r\n", 413),
     (b"GET /_mock/health HTTP/1.1\r\nX-Long: " + b"a" * 70000 + b"\r\n\r\n", 431),
     (b"GET /_mock/health?" + b"a" * 70000 + b" HTTP/1.1\r\n\r\n", 414),
-])
+], ids=["negative-length", "signed-length", "huge-length", "long-header", "long-target"])
 def test_control_request_framing(printer, data, status):
     assert raw_control(printer, data)[0] == status
     assert call(printer, "GET", "/_mock/health")[0] == 200

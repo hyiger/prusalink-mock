@@ -89,6 +89,9 @@ class Request:
     boundary: str = ""
     if_none_match: int = 0
     url_len: int = 0  # bytes of the URL as sent
+    # Not the firmware's: the mock's password when the request's first byte arrived,
+    # to scrub from its log entry even if a control call changes the password meanwhile
+    arrival_password: str = field(default="", repr=False)
 
     def can_keep_alive(self) -> bool:
         """RequestParser::can_keep_alive (req_parser.cpp:265-267)."""
