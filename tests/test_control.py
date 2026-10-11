@@ -181,6 +181,30 @@ def test_clock_advance_rejects_non_finite_seconds(printer, seconds):
         printer.advance_clock(float(seconds))
 
 
+@pytest.mark.parametrize("number", [b"1e309", b"-1e309", b"NaN", b"Infinity"])
+def test_state_rejects_non_finite_numbers(printer, number):
+    before = call(printer, "GET", "/_mock/state")[1]["printer"]["bed"]
+    status, body = call(printer, "PATCH", "/_mock/state", b'{"printer": {"bed": {"actual": ' + number + b"}}}")
+    assert status == 400 and "error" in body
+    assert call(printer, "GET", "/_mock/state")[1]["printer"]["bed"] == before
+    with Conn("127.0.0.1", printer.port) as conn:
+        r = conn.request("GET", "/api/v1/status", [("X-Api-Key", printer.password)])
+    assert r.status == 200 and json.loads(r.body)["printer"]["temp_bed"] == before["actual"]
+
+
+def test_python_api_rejects_non_finite_numbers(printer):
+    with pytest.raises(ValueError):
+        printer.patch_state({"printer": {"bed": {"actual": float("inf")}}})
+
+
+def test_scenario_files_reject_non_finite_numbers(tmp_path):
+    from prusalink_mock.state import ScenarioError, load_document
+    bad = tmp_path / "bad.json"
+    bad.write_text('{"printer": {"bed": {"actual": NaN}}}', encoding="utf-8")
+    with pytest.raises(ScenarioError):
+        load_document(str(bad))
+
+
 @pytest.mark.parametrize("method,path,status", [
     ("GET", "/nope", 404),
     ("GET", "/_mock/nope", 404),

@@ -121,6 +121,13 @@ def test_a_short_folder_name_stands_for_its_folder(printer):
     assert [f["path"] for f in printer.files()] == ["/usb/My Prints/b.gcode"]
 
 
+def test_create_folder_in_a_folder_named_by_its_short_name(printer):
+    assert put(printer, "/api/v1/files/usb/My%20Prints/a.gcode").status == 201
+    assert put(printer, "/api/v1/files/usb/MYPRIN~1/sub", b"", [("Create-Folder", "?1")]).status == 201
+    assert put(printer, "/api/v1/files/usb/My%20Prints/sub/b.gcode").status == 201
+    assert sorted(f["path"] for f in printer.files()) == ["/usb/My Prints/a.gcode", "/usb/My Prints/sub/b.gcode"]
+
+
 def test_short_name_tails_count_up(printer):
     names = [json.loads(put(printer, f"/api/v1/files/usb/benchy{n}.bgcode").body)["name"] for n in ("", "2", "3")]
     assert names == ["BENCHY~1.BGC", "BENCHY~2.BGC", "BENCHY~3.BGC"]

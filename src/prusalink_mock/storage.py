@@ -122,9 +122,10 @@ class Storage:
         path = path.rstrip("/")
         if self.kind(path) is not None:
             return "exists"
-        parent = _parent(path)
+        parent = self.resolve(_parent(path))
         if self.kind(parent) != "dir":
             return "error"
+        path = f"{parent}/{_base(path)}"
         sfn = short_name(_base(path), self._short_names_in(parent))
         self.dirs[_key(path)] = _Dir(path, f"{self.dirs[_key(parent)].sfn_path}/{sfn}")
         return "ok"

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import re
 from importlib import resources
 from pathlib import Path
@@ -17,6 +18,23 @@ from typing import Any, Optional
 
 SCHEMA = "prusalink-mock/scenario@1"
 DEFAULT_SCENARIO = "indx-hy8"
+
+
+def _reject_constant(name: str) -> Any:
+    raise ValueError(f"{name} is not a JSON number")
+
+
+def _finite_float(text: str) -> float:
+    value = float(text)
+    if not math.isfinite(value):
+        raise ValueError(f"{text} is out of range")
+    return value
+
+
+def loads_json(text: str) -> Any:
+    """json.loads without NaN, Infinity or numbers that overflow to infinity, which Python
+    accepts but would then be rendered as invalid JSON."""
+    return json.loads(text, parse_constant=_reject_constant, parse_float=_finite_float)
 
 
 class ScenarioError(ValueError):
@@ -75,7 +93,7 @@ def list_scenarios() -> list[dict[str, str]]:
     out = []
     for entry in _scenario_dir().iterdir():
         if entry.name.endswith(".json"):
-            doc = json.loads(entry.read_text(encoding="utf-8"))
+            doc = loads_json(entry.read_text(encoding="utf-8"))
             out.append({"name": doc.get("name", entry.name[:-5]), "description": doc.get("description", "")})
     return sorted(out, key=lambda d: d["name"])
 
@@ -86,12 +104,15 @@ def load_document(name_or_path: str) -> dict[str, Any]:
     if path.suffix == ".json" or path.exists():
         if not path.is_file():
             raise ScenarioError([f"scenario file not found: {name_or_path}"])
-        return json.loads(path.read_text(encoding="utf-8"))
+        try:
+            return loads_json(path.read_text(encoding="utf-8"))
+        except ValueError as exc:
+            raise ScenarioError([f"{name_or_path}: {exc}"])
     entry = _scenario_dir().joinpath(f"{name_or_path}.json")
     if not entry.is_file():
         known = ", ".join(s["name"] for s in list_scenarios())
         raise ScenarioError([f"unknown scenario {name_or_path!r} (shipped: {known})"])
-    return json.loads(entry.read_text(encoding="utf-8"))
+    return loads_json(entry.read_text(encoding="utf-8"))
 
 
 def load(name_or_path: str) -> dict[str, Any]:
@@ -192,8 +213,8 @@ class _V:
                 self.err(f"{path}/{key}", "required")
             return default
         v = d[key]
-        if isinstance(v, bool) or not isinstance(v, (int, float)):
-            self.err(f"{path}/{key}", "must be a number")
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+            self.err(f"{path}/{key}", "must be a finite number")
             return default
         if (lo is not None and v < lo) or (hi is not None and v > hi):
             self.err(f"{path}/{key}", f"must be in {lo}..{hi}")

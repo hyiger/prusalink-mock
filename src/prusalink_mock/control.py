@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Optional
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from .faults import FaultError
-from .state import ScenarioError, list_scenarios
+from .state import ScenarioError, list_scenarios, loads_json
 
 if TYPE_CHECKING:  # pragma: no cover
     from .core import MockCore
@@ -37,8 +37,8 @@ def _json_body(body: bytes) -> Any:
     if not body:
         raise _Reply(400, {"error": "expected a JSON body"})
     try:
-        return json.loads(body.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return loads_json(body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:  # JSONDecodeError is a ValueError
         raise _Reply(400, {"error": f"invalid JSON: {exc}"})
 
 
