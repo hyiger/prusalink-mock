@@ -106,7 +106,8 @@ class MockPrinter:
 
     @property
     def host(self) -> str:
-        return "127.0.0.1" if self.core.host in ("", "0.0.0.0", "localhost") else self.core.host
+        """The address :attr:`url` points at (an IPv6 address without brackets)."""
+        return self.core.connect_host
 
     @property
     def port(self) -> int:

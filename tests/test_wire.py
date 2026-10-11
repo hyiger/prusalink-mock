@@ -324,3 +324,4 @@ def test_a_mock_bug_answers_500(printer, monkeypatch):
     with Conn("127.0.0.1", printer.port) as conn:
         r = conn.request("GET", "/api/version", key(printer))
     assert r.status == 500 and r.closed and b"prusalink-mock bug" in r.body
+    assert printer.requests()[-1]["error"] == "prusalink-mock bug: RuntimeError: boom"

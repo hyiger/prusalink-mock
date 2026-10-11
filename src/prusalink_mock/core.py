@@ -11,6 +11,7 @@ import asyncio
 import copy
 import json
 import os
+import socket
 import sys
 import time
 import traceback
@@ -30,12 +31,24 @@ HTML_PORTAL = (b"<!doctype html><html><head><title>Sign in</title></head>"
                b"<body><h1>Network login required</h1><p>Please sign in to continue.</p></body></html>\n")
 
 
+def _connect_address(server: asyncio.base_events.Server) -> tuple[str, int]:
+    """An address a client can reach the server on, from the sockets it bound.
+
+    A wildcard host, or a name with several addresses, gets one socket per
+    address, each on its own port when the port was 0. IPv6 sockets are
+    IPv6-only, so the URL has to name a socket of the right family: the IPv4
+    one when there is one, otherwise IPv6.
+    """
+    socks = server.sockets
+    chosen = next((s for s in socks if s.family == socket.AF_INET), socks[0])
+    ip, port = chosen.getsockname()[:2]
+    if chosen.family == socket.AF_INET:
+        return ("127.0.0.1" if ip == "0.0.0.0" else ip), port
+    return ("::1" if ip == "::" else ip.split("%", 1)[0]), port
+
+
 def _url(host: str, port: int) -> str:
-    if host in ("", "0.0.0.0", "127.0.0.1", "localhost", "::"):
-        host = "127.0.0.1"
-    elif ":" in host:
-        host = f"[{host}]"
-    return f"http://{host}:{port}"
+    return f"http://[{host}]:{port}" if ":" in host else f"http://{host}:{port}"
 
 
 class Input:
@@ -84,10 +97,13 @@ class MockCore:
         self.max_upload_bytes = max_upload_bytes
         self.upload_path: Optional[str] = None
         self.upload_owner: Optional[object] = None
+        self.generation = 0  # moves on when a reset or a scenario switch drops the connections
         self.host, self.port = host, port
         self.control_host, self.control_port = control_host, control_port
+        self.connect_host, self.control_connect_host = host, control_host
         self._servers: list[asyncio.base_events.Server] = []
         self._tasks: set[asyncio.Task] = set()
+        self._printer_tasks: set[asyncio.Task] = set()
         self._next_conn = 1
         self._t0 = time.monotonic()
         self._stop_requested: Optional[asyncio.Event] = None
@@ -98,13 +114,21 @@ class MockCore:
         from .control import handle_control
 
         self._stop_requested = asyncio.Event()
-        printer = await asyncio.start_server(self._handle_printer, self.host, self.port)
-        self._servers.append(printer)
-        self.port = printer.sockets[0].getsockname()[1]
-        control = await asyncio.start_server(lambda r, w: self._track(handle_control(self, r, w)),
-                                             self.control_host, self.control_port)
-        self._servers.append(control)
-        self.control_port = control.sockets[0].getsockname()[1]
+        try:
+            printer = await asyncio.start_server(self._handle_printer, self.host, self.port)
+            self._servers.append(printer)
+            self.connect_host, self.port = _connect_address(printer)
+            control = await asyncio.start_server(lambda r, w: self._track(handle_control(self, r, w)),
+                                                 self.control_host, self.control_port)
+            self._servers.append(control)
+            self.control_connect_host, self.control_port = _connect_address(control)
+        except BaseException:
+            for server in self._servers:
+                server.close()
+                await server.wait_closed()
+            self._servers = []
+            self.log.close()
+            raise
 
     async def _track(self, coro) -> None:
         task = asyncio.current_task()
@@ -142,11 +166,11 @@ class MockCore:
 
     @property
     def url(self) -> str:
-        return _url(self.host, self.port)
+        return _url(self.connect_host, self.port)
 
     @property
     def control_url(self) -> str:
-        return _url(self.control_host, self.control_port)
+        return _url(self.control_connect_host, self.control_port)
 
     @property
     def password(self) -> str:
@@ -193,21 +217,38 @@ class MockCore:
         return self.get_state()
 
     def load_scenario(self, name: str) -> dict:
-        """Switch scenario. Files are cleared; faults and the request log stay."""
+        """Switch to another printer: connections drop and files are cleared; faults and the log stay."""
         base = self._with_password(statemod.load(name))
+        self._drop_connections()
         self.base_state, self.scenario_ref = base, name
         self.state = copy.deepcopy(base)
         self.storage.clear()
         return self.get_state()
 
     def reset(self) -> dict:
-        """Reload the scenario and clear faults, the log, files and the clock (a reboot)."""
+        """Reload the scenario and clear faults, the log, files and the clock (a reboot).
+
+        Like a reboot it drops every printer connection, so a request still in
+        flight can't answer, log or store a file after the reset.
+        """
+        self._drop_connections()
         self.state = copy.deepcopy(self.base_state)
         self.storage.clear()
         self.faults.clear()
         self.log.clear()
         self.reboot()
         return self.get_state()
+
+    def _drop_connections(self) -> None:
+        self.generation += 1
+        self.upload_path = self.upload_owner = None
+        try:
+            current = asyncio.current_task()
+        except RuntimeError:  # no running loop, so no connections either
+            current = None
+        for task in list(self._printer_tasks):
+            if task is not current:
+                task.cancel()
 
     def reboot(self) -> None:
         """New nonce random half and uptime 0, so every old nonce is stale."""
@@ -222,6 +263,7 @@ class MockCore:
     async def _handle_printer(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         task = asyncio.current_task()
         self._tasks.add(task)
+        self._printer_tasks.add(task)
         conn_id = self._next_conn
         self._next_conn += 1
         inp = Input(reader)
@@ -237,6 +279,7 @@ class MockCore:
             traceback.print_exc()
         finally:
             self._tasks.discard(task)
+            self._printer_tasks.discard(task)
             try:
                 writer.close()
             except Exception:
@@ -299,10 +342,23 @@ class MockCore:
         self.log.add(entry)
 
     async def _serve(self, req: Request, inp: Input, writer: asyncio.StreamWriter, conn_id: int) -> bool:
-        """Answer one request; returns whether the connection stays open."""
+        """Answer one request; returns whether the connection stays open.
+
+        The log entry is added before the response goes out, so a client that
+        has the response finds the entry; lingering and hanging come after.
+        """
         started = time.monotonic()
+        generation = self.generation
         entry = self._entry(req, conn_id)
         auth: Optional[authmod.AuthResult] = None
+        logged = False
+
+        def commit() -> None:
+            nonlocal logged
+            if not logged and generation == self.generation:  # nothing from before a reset
+                self._log(entry, req, auth, started)
+            logged = True
+
         try:
             resp: Optional[Response] = None
             rule = None
@@ -327,10 +383,12 @@ class MockCore:
                     await asyncio.sleep(action["ms"] / 1000.0)
                 elif kind == "hang":
                     entry["close"] = True
+                    commit()
                     await self._hang(inp, float(action.get("seconds", 30.0)))
                     return False
                 elif kind == "drop" and action["when"] == "before_response":
                     entry["close"] = True
+                    commit()
                     await self._linger(inp, writer)
                     return False
                 elif kind == "status":
@@ -343,11 +401,13 @@ class MockCore:
                     data = resp.wire()
                     cut = len(resp.head) + action.get("after_bytes", (len(data) - len(resp.head)) // 2)
                     entry.update(status=resp.status, close=True)
+                    commit()
                     writer.write(data[:cut])
                     await self._linger(inp, writer)
                     return False
             entry["status"] = resp.status
             entry["close"] = resp.after != KEEP
+            commit()
             writer.write(resp.wire())
             await writer.drain()
             if resp.after == KEEP:
@@ -356,7 +416,7 @@ class MockCore:
                 await self._linger(inp, writer)
             return False
         finally:
-            self._log(entry, req, auth, started)
+            commit()
 
     async def _route(self, req: Request, auth: Optional[authmod.AuthResult], inp: Input, entry: dict) -> Response:
         try:

@@ -170,5 +170,15 @@ def test_redaction_never_shows_secrets():
     assert auth.redact_header("Authorization", "Basic bWFrZXI6cHc=", None) == "Basic <redacted>"
 
 
+def test_reboot_keeps_the_wall_clock():
+    clock = Clock(frozen=True, epoch=1_000_000)
+    clock.advance(3600.5)
+    assert clock.now() == 1_003_600 and clock.uptime() == 3600
+    clock.reboot()
+    assert clock.uptime() == 0 and clock.now() == 1_003_600
+    clock.advance(10)
+    assert clock.now() == 1_003_610
+
+
 def test_digest_client_repr_hides_the_password():
     assert "s3cret" not in repr(auth.DigestClient("s3cret"))

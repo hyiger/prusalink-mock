@@ -160,7 +160,8 @@ def dispatch(core: "MockCore", method: str, target: str, body: bytes) -> tuple[i
     raise _Reply(404, {"error": "unknown endpoint"})
 
 
-async def _read_request(reader: asyncio.StreamReader) -> Optional[tuple[str, str, bytes]]:
+async def _read_request(reader: asyncio.StreamReader,
+                        writer: asyncio.StreamWriter) -> Optional[tuple[str, str, bytes]]:
     line = await asyncio.wait_for(reader.readline(), READ_TIMEOUT_S)
     if not line:
         return None
@@ -169,19 +170,28 @@ async def _read_request(reader: asyncio.StreamReader) -> Optional[tuple[str, str
         raise _Reply(400, {"error": "bad request line"})
     method, target = parts[0].upper(), parts[1]
     length = 0
+    expect_continue = False
     while True:
         h = await asyncio.wait_for(reader.readline(), READ_TIMEOUT_S)
         h = h.rstrip(b"\r\n")
         if not h:
             break
         name, _, value = h.decode("latin-1").partition(":")
-        if name.strip().lower() == "content-length":
+        name = name.strip().lower()
+        if name == "content-length":
             try:
                 length = int(value.strip())
             except ValueError:
                 raise _Reply(400, {"error": "bad Content-Length"})
+        elif name == "expect":
+            expect_continue = value.strip().lower().startswith("100-continue")
     if length > MAX_BODY:
         raise _Reply(413, {"error": "body too large"})
+    if expect_continue and length:
+        # libcurl adds Expect to every PUT and waits a second for this
+        # (RFC 9110, 10.1.1). The printer port never sends it, like the firmware.
+        writer.write(b"HTTP/1.1 100 Continue\r\n\r\n")
+        await writer.drain()
     body = await asyncio.wait_for(reader.readexactly(length), READ_TIMEOUT_S) if length else b""
     return method, target, body
 
@@ -189,7 +199,7 @@ async def _read_request(reader: asyncio.StreamReader) -> Optional[tuple[str, str
 async def handle_control(core: "MockCore", reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     try:
         try:
-            req = await _read_request(reader)
+            req = await _read_request(reader, writer)
             if req is None:
                 return
             status, payload = dispatch(core, *req)

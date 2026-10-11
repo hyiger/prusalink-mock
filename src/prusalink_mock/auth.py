@@ -42,35 +42,41 @@ def digest_response(password: str, method: str, target: str, nonce: str, usernam
 
 
 class Clock:
-    """Uptime source for nonces and file timestamps.
+    """Uptime for nonces, and wall time for file timestamps.
 
-    Real monotonic time by default. ``frozen`` makes uptime move only through
-    :meth:`advance`, so test runs repeat exactly.
+    Real monotonic time by default. ``frozen`` makes time move only through
+    :meth:`advance`, so test runs repeat exactly. A reboot restarts the uptime
+    but not the wall time: on the printer that comes from the RTC and SNTP
+    (src/common/sys_time.cpp, wui_api.cpp:246), and file times from FatFS's
+    get_fattime() (src/buddy/fatfs.cpp:19).
     """
 
     def __init__(self, *, frozen: bool = False, epoch: Optional[float] = None,
                  monotonic: Callable[[], float] = time.monotonic):
         self._monotonic = monotonic
         self.frozen = frozen
-        self.epoch = int(time.time()) if epoch is None else int(epoch)
+        self.epoch = float(int(time.time()) if epoch is None else int(epoch))  # wall time at the last boot
         self._boot = monotonic()
         self._offset = 0.0
 
+    def _elapsed(self) -> float:
+        return self._offset if self.frozen else (self._monotonic() - self._boot + self._offset)
+
     def uptime(self) -> int:
         """Seconds since boot, as uint32 (ticks_s)."""
-        elapsed = self._offset if self.frozen else (self._monotonic() - self._boot + self._offset)
-        return int(elapsed) & 0xFFFFFFFF
+        return int(self._elapsed()) & 0xFFFFFFFF
 
     def advance(self, seconds: float) -> None:
         self._offset += float(seconds)
 
     def reboot(self) -> None:
+        self.epoch += self._elapsed()
         self._boot = self._monotonic()
         self._offset = 0.0
 
     def now(self) -> int:
-        """Wall-clock seconds for file timestamps: epoch at boot plus uptime."""
-        return self.epoch + self.uptime()
+        """Wall-clock seconds for file timestamps."""
+        return int(self.epoch + self._elapsed())
 
 
 class NonceSource:

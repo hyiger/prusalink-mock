@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import socket
+import time
 import urllib.error
 import urllib.request
 from typing import Any
@@ -228,3 +230,88 @@ def test_model_values_follow_the_model(printer):
     assert version["printer"] == "9.9.9" and version["hostname"] == "lab-printer"
     printer.patch_state({"printer": {"printer_version": None}})
     assert _version_info(printer)[0]["printer"] == "7.1.0"
+
+
+def test_reset_drops_a_request_in_flight(printer):
+    printer.add_fault({"match": {"method": "PUT"}, "action": {"type": "delay", "ms": 600}})
+    printer.add_fault({"match": {"method": "GET"}, "action": {"type": "delay", "ms": 600}})
+    put = Conn("127.0.0.1", printer.port)
+    put.send((f"PUT /api/v1/files/usb/slow.gcode HTTP/1.1\r\nX-Api-Key: {printer.password}\r\n"
+              f"Content-Length: 4\r\n\r\nG28\n").encode())
+    get = Conn("127.0.0.1", printer.port)
+    get.send(f"GET /api/v1/tools HTTP/1.1\r\nX-Api-Key: {printer.password}\r\n\r\n".encode())
+    time.sleep(0.2)
+    printer.reset()
+    assert put.read_to_eof() == b"" and get.read_to_eof() == b""  # dropped, as by a reboot
+    put.close()
+    get.close()
+    time.sleep(0.8)
+    assert printer.files() == [] and printer.requests() == []
+
+
+def test_reset_frees_a_stalled_upload(printer):
+    stalled = Conn("127.0.0.1", printer.port)
+    stalled.send((f"PUT /api/v1/files/usb/stalled.gcode HTTP/1.1\r\nX-Api-Key: {printer.password}\r\n"
+                  f"Content-Length: 10\r\n\r\nG28").encode())
+    deadline = time.monotonic() + 10
+    while printer._call(lambda: printer.core.upload_path) is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    printer.load_scenario("indx-gaps")
+    with Conn("127.0.0.1", printer.port) as conn:
+        r = conn.request("PUT", "/api/v1/files/usb/next.gcode", [("X-Api-Key", printer.password),
+                                                                 ("Content-Length", "4")], b"G28\n")
+    assert r.status == 201
+    try:
+        stalled.send(b"\nG1 X1\n")
+    except OSError:
+        pass
+    stalled.close()
+    time.sleep(0.2)
+    assert [f["path"] for f in printer.files()] == ["/usb/next.gcode"]
+
+
+def test_expect_100_continue(printer):
+    """libcurl waits a second for the 100 before sending a PUT body."""
+    body = json.dumps({"loaded": True, "material": "PA", "nozzle_diameter": 0.6, "hardened": True,
+                       "high_flow": True}).encode()
+    with Conn("127.0.0.1", printer.core.control_port) as conn:
+        conn.send((f"PUT /_mock/tools/4 HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\n"
+                   f"Content-Length: {len(body)}\r\n\r\n").encode())
+        conn.sock.settimeout(0.5)
+        assert conn.sock.recv(64) == b"HTTP/1.1 100 Continue\r\n\r\n"
+        conn.sock.settimeout(15)
+        conn.send(body)
+        assert conn.read_response().status == 200
+    assert tools_body(printer)["4"]["material"] == "PA"
+
+
+def test_control_bind_failure_releases_the_printer_port():
+    from prusalink_mock import MockPrinter
+    with socket.socket() as busy:
+        busy.bind(("127.0.0.1", 0))
+        busy.listen()
+        printer = MockPrinter(control_port=busy.getsockname()[1])
+        with pytest.raises(OSError):
+            printer.start()
+        with pytest.raises(OSError):
+            socket.create_connection(("127.0.0.1", printer.core.port), timeout=2).close()
+
+
+def _ipv6_loopback() -> bool:
+    try:
+        with socket.socket(socket.AF_INET6) as s:
+            s.bind(("::1", 0))
+        return True
+    except OSError:
+        return False
+
+
+@pytest.mark.parametrize("host", ["", "0.0.0.0", "localhost", "::"])
+def test_advertised_url_answers(host):
+    from prusalink_mock import MockPrinter
+    if host == "::" and not _ipv6_loopback():
+        pytest.skip("no IPv6 loopback")
+    with MockPrinter(host=host) as printer:
+        assert printer.url == f"http://{'[::1]' if host == '::' else '127.0.0.1'}:{printer.port}"
+        with Conn(printer.host, printer.port) as conn:
+            assert conn.request("GET", "/api/version", [("X-Api-Key", printer.password)]).status == 200

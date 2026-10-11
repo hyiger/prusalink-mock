@@ -32,7 +32,7 @@ Options: `--scenario NAME|FILE`, `--host` (default `127.0.0.1`), `--port` (defau
 2. Authorization: API key `mockKeyTest2345`, or user and password with user `maker` and the same password (that's Digest).
 3. Test, then Send to printer. See what arrived with `curl http://127.0.0.1:8089/_mock/files`.
 
-Use `127.0.0.1` rather than `localhost`: the mock listens on IPv4 only, and `localhost` can resolve to `::1` first.
+Use `127.0.0.1` rather than `localhost`: by default the mock listens on IPv4 only, and `localhost` can resolve to `::1` first. `--host ::` listens on IPv6 only and prints an `http://[::1]:8088` URL.
 
 For manual runs of the fork, start PrusaSlicer with a throwaway `--datadir` and set `filamentdb_url` in its `PrusaSlicer.ini` to a closed port, so the fresh profile doesn't load from or push to your real Filament DB.
 
@@ -74,7 +74,7 @@ A scenario is one flat JSON file. Outside `tools` and `job`, every field has a d
 
 ## Control API
 
-JSON over HTTP on `127.0.0.1:8089` (`$PRUSALINK_MOCK_CONTROL` under `run`). Control traffic never shows up in the request log.
+JSON over HTTP on `127.0.0.1:8089` (`$PRUSALINK_MOCK_CONTROL` under `run`). Control traffic never shows up in the request log. Unlike the printer port, it answers `Expect: 100-continue`, so libcurl doesn't wait a second before each PUT.
 
 | Request | What it does |
 | --- | --- |
@@ -83,8 +83,8 @@ JSON over HTTP on `127.0.0.1:8089` (`$PRUSALINK_MOCK_CONTROL` under `run`). Cont
 | `PUT /_mock/state` | Replace the state; 422 with a list of errors if it's invalid |
 | `PATCH /_mock/state` | Merge patch; `tools` is replaced as a whole, `null` deletes a key |
 | `PUT /_mock/tools/{n}`, `DELETE /_mock/tools/{n}` | Set one tool; delete means its dock isn't calibrated |
-| `GET /_mock/scenarios`, `POST /_mock/scenario {"name": ...}` | List or switch scenarios (clears files) |
-| `POST /_mock/reset` | Reload the scenario; clear faults, log and files; reboot |
+| `GET /_mock/scenarios`, `POST /_mock/scenario {"name": ...}` | List or switch scenarios (drops printer connections, clears files) |
+| `POST /_mock/reset` | Reload the scenario; clear faults, log and files; reboot, which drops printer connections and requests in flight |
 | `GET /_mock/requests?since=N`, `DELETE /_mock/requests` | Request log after sequence N; clear it |
 | `GET /_mock/files`, `GET /_mock/files/{path}`, `DELETE ...` | Uploaded files; the raw bytes of one |
 | `GET`, `POST`, `DELETE /_mock/faults`, `DELETE /_mock/faults/{id}` | Fault rules |
@@ -104,7 +104,7 @@ curl -o got.gcode "$C/_mock/files/benchy.bgcode"
 curl -X POST $C/_mock/clock/advance -d '{"seconds":301}'
 ```
 
-Log entries carry the method, the raw target, the normalized path, headers with the API key and Digest response redacted, the auth outcome, status, whether the connection closed, the fault that fired, and upload details (`stored_as`, `sfn_path`, `overwrite`, `print_after_upload`). `--log-file` also appends them to a JSON lines file.
+Log entries carry the method, the raw target, the normalized path, headers with the API key and Digest response redacted, the auth outcome, status, whether the connection closed, the fault that fired, upload details (`stored_as`, `sfn_path`, `overwrite`, `print_after_upload`), `print_requested` for a print start, and `error` for timeouts, early closes and bugs in the mock. An entry is in the log before its response goes out. `--log-file` also appends them to a JSON lines file.
 
 ## Fault rules
 

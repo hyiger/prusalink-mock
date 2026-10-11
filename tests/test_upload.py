@@ -265,3 +265,40 @@ def test_delete_during_an_overwriting_upload(printer):
         slow.send(b"G28\n")
         assert slow.read_response().status == 201
     assert printer.file_bytes("x.gcode") == b"new\nG28\n"
+
+
+def test_later_upload_after_a_reboot_is_newer(printer):
+    """Reboots restart uptime, not the wall clock that stamps files."""
+    printer.advance_clock(3600)
+    before = json.loads(put(printer, "/api/v1/files/usb/before.gcode").body)["m_timestamp"]
+    printer.reboot()
+    after = json.loads(put(printer, "/api/v1/files/usb/after.gcode").body)["m_timestamp"]
+    assert after >= before
+
+
+def test_log_has_the_entry_when_the_client_has_the_response(printer):
+    """Error-close responses linger until the client closes; the entry must not wait for that."""
+    put(printer, "/api/v1/files/usb/p.gcode")
+    for _ in range(20):
+        with Conn("127.0.0.1", printer.port) as conn:
+            r = conn.request("POST", "/api/v1/files/usb/p.gcode", [("X-Api-Key", printer.password)])
+            assert r.status == 204
+            entries = [e for e in printer.requests() if e["route"] == "v1.files.print"]
+            assert entries and entries[-1]["print_requested"] == "/usb/p.gcode"
+            printer.clear_requests()
+    with Conn("127.0.0.1", printer.port) as conn:
+        r = conn.request("PUT", "/api/v1/files/usb/bad.txt", [("X-Api-Key", printer.password),
+                                                              ("Content-Length", "4")], b"G28\n")
+        assert r.status == 415 and [e["status"] for e in printer.requests()] == [415]
+
+
+def test_http_client_sees_the_print_entry(printer):
+    import http.client
+    put(printer, "/api/v1/files/usb/p.gcode")
+    for _ in range(20):
+        c = http.client.HTTPConnection("127.0.0.1", printer.port, timeout=15)
+        c.request("POST", "/api/v1/files/usb/p.gcode", headers={"X-Api-Key": printer.password})
+        assert c.getresponse().status == 204
+        c.close()
+        assert [e["status"] for e in printer.requests() if e["route"] == "v1.files.print"]
+        printer.clear_requests()
