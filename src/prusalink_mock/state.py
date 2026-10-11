@@ -32,10 +32,39 @@ def _finite_float(text: str) -> float:
     return value
 
 
+def _nests_deeper_than(text: str, limit: int) -> bool:
+    """Whether arrays and objects in the JSON ``text`` nest deeper than ``limit``, found
+    without recursing."""
+    depth = 0
+    in_string = escaped = False
+    for ch in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch in "[{":
+            depth += 1
+            if depth > limit:
+                return True
+        elif ch in "]}":
+            depth -= 1
+    return False
+
+
 def loads_json(text: str) -> Any:
     """json.loads without NaN, Infinity or numbers that overflow to infinity, which Python
     accepts but would then be rendered as invalid JSON. Nesting too deep to parse is a
-    ValueError too."""
+    ValueError too: it is rejected before parsing, as the C parser can overflow a thread's
+    smaller stack on Windows before it raises RecursionError."""
+    # check_depth reports a document over MAX_DEPTH with a precise path; this only keeps
+    # the parser itself safe
+    if _nests_deeper_than(text, MAX_DEPTH + 2):
+        raise ValueError(f"nested deeper than {MAX_DEPTH} levels")
     try:
         return json.loads(text, parse_constant=_reject_constant, parse_float=_finite_float)
     except RecursionError:

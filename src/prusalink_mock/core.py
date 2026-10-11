@@ -328,7 +328,7 @@ class MockCore:
                     req = parser.request()
                     entry = self._entry(req, conn_id)
                     entry.update(route="invalid", status=408, close=True, error="request head timed out")
-                    self._log(entry, req, None, time.monotonic())
+                    self._log(entry, req, None, time.monotonic(), self.password)
                     writer.write(wire.GOODBYE)
                     await writer.drain()
                 return None
@@ -356,13 +356,16 @@ class MockCore:
             "fault": None,
         }
 
-    def _log(self, entry: dict, req: Request, auth: Optional[authmod.AuthResult], started: float) -> None:
-        entry["headers"] = [[authmod.scrub(n, self.password), authmod.redact_header(n, v, auth, self.password)]
-                            for n, v in req.headers]
+    def _log(self, entry: dict, req: Request, auth: Optional[authmod.AuthResult], started: float,
+             request_password: str) -> None:
+        """Log a request, with the password scrubbed: the one it arrived under, which a control
+        call can change while it waits for a body or a delay, and the current one."""
+        entry["headers"] = [[n, authmod.redact_header(n, v, auth, request_password)] for n, v in req.headers]
         # The password can also come in the target, a file name, any header or other text the
         # client sent, encoded or not
-        for key, value in entry.items():
-            entry[key] = authmod.scrub_value(value, self.password)
+        for password in {request_password, self.password}:
+            for key, value in entry.items():
+                entry[key] = authmod.scrub_value(value, password)
         entry["duration_ms"] = round((time.monotonic() - started) * 1000, 1)
         self.log.add(entry)
 
@@ -374,6 +377,7 @@ class MockCore:
         """
         started = time.monotonic()
         generation = self.generation
+        request_password = self.password
         entry = self._entry(req, conn_id)
         auth: Optional[authmod.AuthResult] = None
         logged = False
@@ -381,7 +385,7 @@ class MockCore:
         def commit() -> None:
             nonlocal logged
             if not logged and generation == self.generation:  # nothing from before a reset
-                self._log(entry, req, auth, started)
+                self._log(entry, req, auth, started, request_password)
             logged = True
 
         try:

@@ -369,3 +369,16 @@ def test_password_is_redacted_from_every_logged_field(tmp_path):
         entries = json.dumps(printer.requests())
         assert key not in entries and lower not in entries.lower() and entries.count("<redacted>") >= 6
     assert key not in log.read_text(encoding="utf-8")
+
+
+def test_password_changed_mid_request_is_still_redacted(printer):
+    old = printer.password
+    with Conn("127.0.0.1", printer.port) as conn:
+        conn.sock.sendall(f"PUT /api/v1/files/usb/{old}.gcode HTTP/1.1\r\nHost: x\r\nX-Api-Key: {old}\r\n"
+                          "Content-Length: 8\r\n\r\nG28\n".encode())
+        time.sleep(0.3)  # the request waits for the rest of its body
+        printer.patch_state({"auth": {"password": "newKey123"}})
+        conn.sock.sendall(b"G28\n")
+        conn.read_response()
+    entries = json.dumps(printer.requests())
+    assert old not in entries and "<redacted>" in entries

@@ -383,7 +383,8 @@ def test_epoch_is_a_fat_time(epoch):
 ])
 def test_fault_rules_the_printer_port_could_not_send(printer, raw):
     status, body = call(printer, "POST", "/_mock/faults", raw)
-    assert status == 422, body
+    # JSON nested past the depth limit is refused while parsing, before the rule is read
+    assert status == (400 if b"[" * 100 in raw else 422), body
     assert call(printer, "GET", "/_mock/faults")[1]["faults"] == []
     assert printer_get(printer, "/api/version").status == 200
 
@@ -588,3 +589,11 @@ def test_the_password_never_reaches_the_log(tmp_path):
     assert entries[0]["headers"] == [["Authorization", "<redacted>"]]
     assert entries[2]["auth"]["username"] == "maker <redacted> x"
     assert entries[3]["headers"] == [["Authorization", "Basic <redacted>"]]
+
+
+def test_brackets_in_strings_dont_count_as_nesting():
+    from prusalink_mock.state import loads_json
+    text = '{"name": "' + "[{" * 200 + '\\"]}"}'
+    assert loads_json(text)["name"].startswith("[{[{")
+    with pytest.raises(ValueError, match="nested deeper"):
+        loads_json('{"a":' * 40 + "1" + "}" * 40)
